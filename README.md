@@ -64,9 +64,15 @@ TLS, so the iPad<->Mac hop is fully encrypted.
 
 ## Requirements
 
-- macOS with `opencode`, `python3`, `openssl` (the installer checks for them)
-- An iPad on the **same local network**
-- No third-party apps, no tunnels, no accounts, no public exposure
+- **Any Mac** — MacBook, iMac, Mac mini, Mac Studio — running a recent macOS.
+  CI tests on macOS 15, both Intel and Apple Silicon.
+- [`opencode`](https://opencode.ai) installed on that Mac (e.g. `brew install
+  opencode`). The relay itself adds nothing beyond what macOS ships.
+- `python3` and `openssl` — stock on macOS. On a brand-new Mac, running
+  `python3` for the first time may show an Apple dialog offering to install
+  the Command Line Tools; accept it once and you're set.
+- An iPad on the **same local network**.
+- No third-party apps on the iPad, no tunnels, no accounts, no public exposure.
 
 ## Quickstart
 
