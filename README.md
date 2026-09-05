@@ -38,8 +38,8 @@ real HTTPS, LAN-only, password-protected, no installs.
 ## Screenshots
 
 ![Terminal running opencode-web](.github/images/term.jpg)
-![iPad prompting for the HTTPS login](.github/images/auth_ipad.JPG)
-![opencode web running on an iPad over HTTPS](.github/images/landing_ipad.JPG)
+![iPad prompting for the HTTPS login](.github/images/auth_ipad.jpg)
+![opencode web running on an iPad over HTTPS](.github/images/landing_ipad.jpg)
 
 ## Architecture
 
@@ -66,7 +66,7 @@ TLS, so the iPad<->Mac hop is fully encrypted.
 - **Any Mac** — MacBook, iMac, Mac mini, Mac Studio — running a recent macOS.
   CI tests on macOS 15, both Intel and Apple Silicon.
 - [`opencode`](https://opencode.ai) installed on that Mac (e.g. `brew install
-  opencode`). The relay itself adds nothing beyond what macOS ships.
+opencode`). The relay itself adds nothing beyond what macOS ships.
 - `python3` and `openssl` — stock on macOS. On a brand-new Mac, running
   `python3` for the first time may show an Apple dialog offering to install
   the Command Line Tools; accept it once and you're set.
