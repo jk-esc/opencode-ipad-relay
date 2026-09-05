@@ -1,0 +1,36 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Build source tarball
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          NAME="opencode-ipad-relay-${VERSION}"
+          # Package exactly the tracked files (no caches, no local secrets).
+          git archive --format=tar.gz --prefix="${NAME}/" -o "${NAME}.tar.gz" HEAD
+          shasum -a 256 "${NAME}.tar.gz" > SHA256SUMS.txt
+          echo "=== contents ==="
+          tar -tzf "${NAME}.tar.gz"
+          echo "=== checksums ==="
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@72f2c99fcb16243ebadb0990b034d49ad3e18a81 # v2.2.1
+        with:
+          files: |
+            opencode-ipad-relay-*.tar.gz
+            SHA256SUMS.txt
+          generate_release_notes: true

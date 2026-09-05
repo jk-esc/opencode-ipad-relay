@@ -1,0 +1,30 @@
+# Secrets — never commit these
+password
+cert.pem
+key.pem
+
+# Local session transcripts (may contain sensitive details)
+session-ses_*.md
+
+# Maintainer-only (local context / docs — not part of the shipped product)
+AGENTS.md
+docs/
+
+# macOS
+.DS_Store
+
+# Dev tooling (local only)
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Release artifacts
+dist/
+*.tar.gz
+SHA256SUMS.txt

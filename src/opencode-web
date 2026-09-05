@@ -1,0 +1,32 @@
+#!/bin/bash
+set -e
+
+PASSWORD_FILE="$HOME/.local/share/opencode-web/password"
+PORT=4096
+
+if [ ! -f "$PASSWORD_FILE" ]; then
+  echo "error: $PASSWORD_FILE not found — run install.sh first" >&2
+  exit 1
+fi
+PASSWORD="$(cat "$PASSWORD_FILE")"
+
+echo "Starting opencode web (secure, mDNS, password-protected)..."
+
+OPENCODE_SERVER_PASSWORD="$PASSWORD" caffeinate -i opencode web --mdns --port "$PORT" &
+OPENCODE_PID=$!
+
+trap 'kill $OPENCODE_PID 2>/dev/null || true' EXIT INT TERM
+
+for _ in $(seq 1 20); do
+  if lsof -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.5
+done
+
+echo ""
+echo "  This Mac (backend):  http://localhost:$PORT"
+echo "  iPad (this network): https://opencode.local"
+echo ""
+
+python3 "$HOME/.local/bin/opencode-web-proxy.py"
