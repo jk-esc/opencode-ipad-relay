@@ -69,7 +69,7 @@ jobs:
           bandit -r src/ -q
 
       - name: gitleaks
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24fb42907128877770baf # v2.3.9
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
 
   test:
     name: Test (${{ matrix.os }})
