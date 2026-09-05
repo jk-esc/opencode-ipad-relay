@@ -37,10 +37,9 @@ real HTTPS, LAN-only, password-protected, no installs.
 
 ## Screenshots
 
-<!-- Uncomment after adding images to .github/images/
-![opencode web on an iPad over HTTPS, Safari padlock visible](.github/images/ipad-https.png)
-![Terminal running opencode-web](.github/images/terminal-opencode-web.png)
--->
+![Terminal running opencode-web](.github/images/term.jpg)
+![iPad prompting for the HTTPS login](.github/images/auth_ipad.JPG)
+![opencode web running on an iPad over HTTPS](.github/images/landing_ipad.JPG)
 
 ## Architecture
 
