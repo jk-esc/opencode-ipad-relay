@@ -28,4 +28,4 @@ jobs:
           languages: python
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@fe4161a26a8629af62121b670040955b330f9af2 # v3.28.13
+        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v3.28.13
