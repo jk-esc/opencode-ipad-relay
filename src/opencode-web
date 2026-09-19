@@ -2,7 +2,7 @@
 set -e
 
 PASSWORD_FILE="$HOME/.local/share/opencode-web/password"
-PORT=4096
+PORT="${OPENCODE_WEB_PORT:-4096}"
 
 if [ ! -f "$PASSWORD_FILE" ]; then
   echo "error: $PASSWORD_FILE not found — run install.sh first" >&2
@@ -10,9 +10,11 @@ if [ ! -f "$PASSWORD_FILE" ]; then
 fi
 PASSWORD="$(cat "$PASSWORD_FILE")"
 
-echo "Starting opencode web (secure, mDNS, password-protected)..."
+echo "Starting opencode web (loopback-only backend, password-protected)..."
 
-OPENCODE_SERVER_PASSWORD="$PASSWORD" caffeinate -i opencode web --mdns --port "$PORT" &
+# The backend must never be reachable from the LAN: only the TLS relay is.
+# Without --hostname, `opencode web --mdns` binds 0.0.0.0 (plain HTTP).
+OPENCODE_SERVER_PASSWORD="$PASSWORD" caffeinate -i opencode web --hostname 127.0.0.1 --port "$PORT" &
 OPENCODE_PID=$!
 
 trap 'kill $OPENCODE_PID 2>/dev/null || true' EXIT INT TERM

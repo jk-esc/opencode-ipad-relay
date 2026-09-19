@@ -161,3 +161,39 @@ run_install() {
   [ ! -f "$BIN_DIR/opencode-web" ]
   [ ! -d "$DATA_DIR" ]
 }
+
+# --- launcher ---------------------------------------------------------------
+#
+# The launcher is exercised with stubs so no real server ever binds a port:
+#   opencode   -> records its argv to $HOME/opencode.args and exits
+#   caffeinate -> execs the wrapped utility (drops its own flags)
+#   python3    -> no-op (the relay itself is covered by pytest)
+
+stub_launcher_deps() {
+  cat >"$STUB_BIN/opencode" <<'EOF2'
+#!/bin/bash
+printf '%s\n' "$@" >"$HOME/opencode.args"
+exit 0
+EOF2
+  cat >"$STUB_BIN/caffeinate" <<'EOF2'
+#!/bin/bash
+while [ "${1#-}" != "$1" ]; do shift; done
+exec "$@"
+EOF2
+  cat >"$STUB_BIN/python3" <<'EOF2'
+#!/bin/bash
+exit 0
+EOF2
+  chmod +x "$STUB_BIN/opencode" "$STUB_BIN/caffeinate" "$STUB_BIN/python3"
+}
+
+@test "launcher binds the backend to loopback only (no LAN-facing plain HTTP)" {
+  run run_install "secret-pw" "secret-pw"
+  [ "$status" -eq 0 ]
+  stub_launcher_deps
+  run "$BIN_DIR/opencode-web"
+  [ -f "$HOME/opencode.args" ]
+  args="$(tr '\n' ' ' <"$HOME/opencode.args")"
+  assert_contains "$args" "--hostname 127.0.0.1"
+  assert_not_contains "$args" "--mdns"
+}
