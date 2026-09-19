@@ -7,6 +7,36 @@
 
 set -euo pipefail
 
+usage() {
+  cat <<'USAGE'
+usage: ./install.sh [--password] [--help]
+
+  (no flags)   generate a strong password and show it once
+  --password   choose your own password instead (prompted, hidden)
+  --help       show this message
+USAGE
+}
+
+CHOOSE_PASSWORD=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+  --password) CHOOSE_PASSWORD=1 ;;
+  -h | --help)
+    usage
+    exit 0
+    ;;
+  *)
+    echo "error: unknown option '$1'" >&2
+    echo "" >&2
+    usage >&2
+    exit 2
+    ;;
+  esac
+  shift
+done
+
+MIN_PASSWORD_LEN=12
+
 SRC_DIR="$(cd "$(dirname "$0")/src" && pwd)"
 BIN_DIR="$HOME/.local/bin"
 DATA_DIR="$HOME/.local/share/opencode-web"
@@ -53,29 +83,66 @@ esac
 
 # --- 2. Password -----------------------------------------------------------
 
+# Anyone who has this password can run commands on this Mac, and neither
+# opencode nor the relay can tell a guess from a typo, so a generated one
+# is the default. 20 characters from a 32-symbol alphabet is 100 bits.
+# The alphabet has no capitals and no 0/O/1/l, to be typeable on an iPad.
+generate_password() {
+  python3 -c '
+import secrets
+alphabet = "abcdefghijkmnpqrstuvwxyz23456789"
+pw = "".join(secrets.choice(alphabet) for _ in range(20))
+print("-".join(pw[i : i + 5] for i in range(0, 20, 5)))
+'
+}
+
+prompt_password() {
+  local pw1 pw2
+  while true; do
+    printf "Choose the opencode web password (input hidden): " >&2
+    if ! IFS= read -rs pw1; then
+      echo "" >&2
+      echo "error: no password given (stdin ended)." >&2
+      return 1
+    fi
+    echo "" >&2
+    if [ -z "$pw1" ]; then
+      echo "password cannot be empty, try again." >&2
+      continue
+    fi
+    if [ "${#pw1}" -lt "$MIN_PASSWORD_LEN" ]; then
+      echo "password must be at least $MIN_PASSWORD_LEN characters, try again." >&2
+      continue
+    fi
+    printf "Repeat it to confirm: " >&2
+    if ! IFS= read -rs pw2; then
+      echo "" >&2
+      echo "error: no password given (stdin ended)." >&2
+      return 1
+    fi
+    echo "" >&2
+    if [ "$pw1" != "$pw2" ]; then
+      echo "passwords do not match, try again." >&2
+      continue
+    fi
+    printf '%s' "$pw1"
+    return 0
+  done
+}
+
+GENERATED_PASSWORD=""
 if [ -f "$PASSWORD_FILE" ]; then
   echo "[ok] password already set (kept)."
-else
-  while true; do
-    printf "Choose the opencode web password (input hidden): "
-    read -rs pw1
-    echo ""
-    if [ -z "$pw1" ]; then
-      echo "password cannot be empty, try again."
-      continue
-    fi
-    printf "Repeat it to confirm: "
-    read -rs pw2
-    echo ""
-    if [ "$pw1" != "$pw2" ]; then
-      echo "passwords do not match, try again."
-      continue
-    fi
-    break
-  done
-  (umask 077 && printf '%s' "$pw1" >"$PASSWORD_FILE")
-  unset pw1 pw2
+elif [ "$CHOOSE_PASSWORD" -eq 1 ]; then
+  pw="$(prompt_password)"
+  (umask 077 && printf '%s' "$pw" >"$PASSWORD_FILE")
+  unset pw
   echo "[ok] password saved to $PASSWORD_FILE (mode 600)."
+else
+  GENERATED_PASSWORD="$(generate_password)"
+  (umask 077 && printf '%s' "$GENERATED_PASSWORD" >"$PASSWORD_FILE")
+  echo "[ok] generated a password and saved it to $PASSWORD_FILE (mode 600)."
+  echo "     (re-run with --password to choose your own instead)"
 fi
 
 # --- 3. Certificate --------------------------------------------------------
@@ -116,5 +183,15 @@ echo ""
 echo "Then, whenever you want to use it:"
 echo ""
 echo "  Mac:   opencode-web"
-echo "  iPad:  https://opencode.local  (username 'opencode' + your password)"
+echo "  iPad:  https://opencode.local"
+echo ""
+if [ -n "$GENERATED_PASSWORD" ]; then
+  echo "  Log in as 'opencode' with this password:"
+  echo ""
+  echo "      $GENERATED_PASSWORD"
+  echo ""
+  echo "  It is written down in $PASSWORD_FILE if you lose it."
+else
+  echo "  Log in as 'opencode' with your password."
+fi
 echo ""
