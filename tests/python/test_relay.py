@@ -699,3 +699,37 @@ def test_old_python_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_current_python_is_accepted() -> None:
     relay.require_supported_python()
+
+
+# --------------------------------------------------------------------------- #
+# Logging
+# --------------------------------------------------------------------------- #
+
+
+def test_connections_are_logged_without_leaking_traffic(
+    relay_server: int, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Without a log there is no way to notice someone probing the relay.
+
+    Payload bytes must never appear: everything through here is the
+    contents of the user's editor session.
+    """
+    with caplog.at_level("INFO", logger="opencode-web-proxy"):
+        status, _ = _http_get(relay_server, "/")
+        assert status == 200
+        time.sleep(0.3)
+    text = caplog.text
+    assert "127.0.0.1" in text, f"peer address should be logged: {text!r}"
+    assert "hello" not in text, "response body leaked into the log"
+    assert "GET /" not in text, "request line leaked into the log"
+
+
+def test_refusals_are_logged(always_replies, relay_to, caplog) -> None:
+    port = relay_to(always_replies(OK), max_connections=1, new_per_minute=99)
+    held = _tls_connect(port)
+    try:
+        with caplog.at_level("INFO", logger="opencode-web-proxy"):
+            _expect_refused(port)
+        assert "refus" in caplog.text.lower(), caplog.text
+    finally:
+        held.close()
