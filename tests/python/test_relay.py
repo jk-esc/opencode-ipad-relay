@@ -266,3 +266,61 @@ def test_missing_cert_exits_clearly(
         relay.main()
     # sys.exit(str) stores the message in SystemExit.code.
     assert "cert/key not found" in str(excinfo.value.code)
+
+
+# --------------------------------------------------------------------------- #
+# Availability under attack
+# --------------------------------------------------------------------------- #
+
+
+def test_stalled_client_does_not_block_others(
+    cert: tuple[str, str], backend: tuple[str, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One client that connects and says nothing must not freeze the relay.
+
+    The TLS handshake used to happen inside accept(), on the single thread
+    running serve_forever, so a peer that opened a socket and never sent a
+    ClientHello held up every other connection until it went away.
+    """
+    certfile, keyfile = cert
+    host, port = backend
+    monkeypatch.setattr(relay, "BACKEND_HOST", host)
+    monkeypatch.setattr(relay, "BACKEND_PORT", port)
+    server = relay.create_server(certfile, keyfile, "127.0.0.1", 0, handshake_timeout=2)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        listen_port = server.server_address[1]
+        assert _http_get(listen_port, "/") == (200, b"<html>hello</html>")
+
+        stalled = socket.create_connection(("127.0.0.1", listen_port))
+        try:
+            time.sleep(0.3)
+            started = time.monotonic()
+            status, body = _http_get(listen_port, "/")
+            assert status == 200 and body == b"<html>hello</html>"
+            assert time.monotonic() - started < 3
+        finally:
+            stalled.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_silent_client_is_dropped_after_the_handshake_timeout(
+    cert: tuple[str, str], backend: tuple[str, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A peer that never starts TLS is disconnected rather than held open."""
+    certfile, keyfile = cert
+    host, port = backend
+    monkeypatch.setattr(relay, "BACKEND_HOST", host)
+    monkeypatch.setattr(relay, "BACKEND_PORT", port)
+    server = relay.create_server(certfile, keyfile, "127.0.0.1", 0, handshake_timeout=1)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        stalled = socket.create_connection(("127.0.0.1", server.server_address[1]))
+        stalled.settimeout(6)
+        assert stalled.recv(1) == b"", "server should have closed the silent client"
+    finally:
+        stalled.close()
+        server.shutdown()
+        server.server_close()
