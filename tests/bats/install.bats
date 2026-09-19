@@ -84,12 +84,19 @@ seed_cert() {
   chmod 644 "$DATA_DIR/cert.pem"
 }
 
+# Default: the installer generates the password and must not read stdin.
+# </dev/null keeps a regression here as a fast failure rather than a hang.
 run_install() {
-  printf '%s\n' "$@" | "$REPO_ROOT/install.sh"
+  "$REPO_ROOT/install.sh" </dev/null
+}
+
+# --password: the installer prompts, so feed it the answers.
+run_install_pw() {
+  printf '%s\n' "$@" | "$REPO_ROOT/install.sh" --password
 }
 
 @test "fresh install creates password, cert, key and scripts" {
-  run run_install "secret-pw" "secret-pw"
+  run run_install
   [ "$status" -eq 0 ]
   [ -f "$PASSWORD_FILE" ]
   [ -f "$CERT_FILE" ]
@@ -100,22 +107,22 @@ run_install() {
 
 @test "password file is mode 600 and contains the chosen password" {
   seed_cert
-  run run_install "secret-pw" "secret-pw"
+  run run_install_pw "correct horse" "correct horse"
   [ "$status" -eq 0 ]
   perms="$(stat -f '%Lp' "$PASSWORD_FILE")"
   [ "$perms" = "600" ]
-  [ "$(cat "$PASSWORD_FILE")" = "secret-pw" ]
+  [ "$(cat "$PASSWORD_FILE")" = "correct horse" ]
 }
 
 @test "private key is mode 600, cert is mode 644" {
-  run run_install "secret-pw" "secret-pw"
+  run run_install
   [ "$status" -eq 0 ]
   [ "$(stat -f '%Lp' "$KEY_FILE")" = "600" ]
   [ "$(stat -f '%Lp' "$CERT_FILE")" = "644" ]
 }
 
 @test "generated certificate is for opencode.local with SAN" {
-  run run_install "secret-pw" "secret-pw"
+  run run_install
   [ "$status" -eq 0 ]
   subject="$(openssl x509 -in "$CERT_FILE" -noout -subject)"
   assert_contains "$subject" "opencode.local"
@@ -125,13 +132,13 @@ run_install() {
 
 @test "installer is idempotent: re-run keeps files, no re-prompt" {
   seed_cert
-  run run_install "secret-pw" "secret-pw"
+  run run_install
   [ "$status" -eq 0 ]
   cert_before="$(shasum "$CERT_FILE")"
   pw_before="$(shasum "$PASSWORD_FILE")"
 
   # Second run with different piped input must NOT change anything.
-  run run_install "different" "different"
+  run run_install
   [ "$status" -eq 0 ]
   assert_contains "$output" "password already set (kept)"
   assert_contains "$output" "certificate already exists (kept)"
@@ -141,25 +148,25 @@ run_install() {
 
 @test "mismatched passwords are rejected and re-prompted" {
   seed_cert
-  run run_install "one" "two" "three" "three"
+  run run_install_pw "one two three" "four five six" "one two three" "one two three"
   [ "$status" -eq 0 ]
   assert_contains "$output" "passwords do not match"
-  [ "$(cat "$PASSWORD_FILE")" = "three" ]
+  [ "$(cat "$PASSWORD_FILE")" = "one two three" ]
 }
 
 @test "empty password is rejected" {
   seed_cert
-  run run_install "" "valid" "valid"
+  run run_install_pw "" "long enough pw" "long enough pw"
   [ "$status" -eq 0 ]
   assert_contains "$output" "password cannot be empty"
-  [ "$(cat "$PASSWORD_FILE")" = "valid" ]
+  [ "$(cat "$PASSWORD_FILE")" = "long enough pw" ]
 }
 
 @test "launcher errors clearly when password file is missing" {
   seed_cert
   # Install scripts but not password: create scripts via a full install, then
   # delete the password file and invoke the launcher directly.
-  run run_install "secret-pw" "secret-pw"
+  run run_install
   [ "$status" -eq 0 ]
   rm -f "$PASSWORD_FILE"
   run "$BIN_DIR/opencode-web"
@@ -169,7 +176,7 @@ run_install() {
 
 @test "uninstall removes scripts but keeps data dir when answered 'n'" {
   seed_cert
-  run run_install "secret-pw" "secret-pw"
+  run run_install
   [ "$status" -eq 0 ]
   run bash -c "printf 'n\n' | HOME='$TEST_HOME' '$REPO_ROOT/uninstall.sh'"
   [ "$status" -eq 0 ]
@@ -181,7 +188,7 @@ run_install() {
 
 @test "uninstall removes data dir when answered 'y'" {
   seed_cert
-  run run_install "secret-pw" "secret-pw"
+  run run_install
   [ "$status" -eq 0 ]
   run bash -c "printf 'y\n' | HOME='$TEST_HOME' '$REPO_ROOT/uninstall.sh'"
   [ "$status" -eq 0 ]
@@ -223,7 +230,7 @@ EOF2
 
 @test "launcher binds the backend to loopback only (no LAN-facing plain HTTP)" {
   seed_cert
-  run run_install "secret-pw" "secret-pw"
+  run run_install
   [ "$status" -eq 0 ]
   stub_launcher_deps
   run "$BIN_DIR/opencode-web"
@@ -257,7 +264,7 @@ EOF2
 
 @test "launcher advertises opencode.local via dns-sd with the LAN IPv4" {
   seed_cert
-  run run_install "secret-pw" "secret-pw"
+  run run_install
   [ "$status" -eq 0 ]
   stub_launcher_deps
   stub_mdns_deps
@@ -269,7 +276,7 @@ EOF2
 
 @test "launcher stops the dns-sd advertisement when it exits" {
   seed_cert
-  run run_install "secret-pw" "secret-pw"
+  run run_install
   [ "$status" -eq 0 ]
   stub_launcher_deps
   stub_mdns_deps
@@ -282,7 +289,7 @@ EOF2
 
 @test "launcher still starts, with a warning, when the LAN IPv4 cannot be determined" {
   seed_cert
-  run run_install "secret-pw" "secret-pw"
+  run run_install
   [ "$status" -eq 0 ]
   stub_launcher_deps
   stub_mdns_deps
@@ -306,7 +313,7 @@ assert_dead() {
 
 @test "launcher records the PIDs of everything it starts" {
   seed_cert
-  run run_install "secret-pw" "secret-pw"
+  run run_install
   [ "$status" -eq 0 ]
   stub_launcher_deps
   stub_mdns_deps
@@ -326,7 +333,7 @@ assert_dead() {
 
 @test "kill -TERM on the launcher stops opencode, dns-sd and the relay" {
   seed_cert
-  run run_install "secret-pw" "secret-pw"
+  run run_install
   [ "$status" -eq 0 ]
   stub_launcher_deps
   stub_mdns_deps
@@ -350,7 +357,7 @@ assert_dead() {
 
 @test "launcher fails fast when opencode dies before it is ready" {
   seed_cert
-  run run_install "secret-pw" "secret-pw"
+  run run_install
   [ "$status" -eq 0 ]
   stub_launcher_deps
   stub_mdns_deps
@@ -363,7 +370,7 @@ assert_dead() {
 
 @test "launcher exits with the relay's status" {
   seed_cert
-  run run_install "secret-pw" "secret-pw"
+  run run_install
   [ "$status" -eq 0 ]
   stub_launcher_deps
   stub_mdns_deps
@@ -374,7 +381,7 @@ assert_dead() {
 
 @test "uninstall stops the processes listed in run.pid" {
   seed_cert
-  run run_install "secret-pw" "secret-pw"
+  run run_install
   [ "$status" -eq 0 ]
   sleep 60 >/dev/null 2>&1 &
   FAKE_PID=$!
@@ -392,4 +399,58 @@ assert_dead() {
   # only ever kill PIDs it recorded itself.
   run grep -cE '^[[:space:]]*[^#]*\bpkill\b' "$REPO_ROOT/uninstall.sh"
   [ "$output" = "0" ]
+}
+
+# --- password strength --------------------------------------------------------
+
+@test "installer generates a strong password by default and shows it once" {
+  seed_cert
+  run run_install
+  [ "$status" -eq 0 ]
+  pw="$(cat "$PASSWORD_FILE")"
+  [ "${#pw}" -ge 20 ]
+  # Shown exactly once so it can be typed on the iPad.
+  assert_contains "$output" "$pw"
+  [ "$(grep -c -- "$pw" <<<"$output")" -eq 1 ]
+}
+
+@test "generated passwords differ between installs" {
+  seed_cert
+  run run_install
+  [ "$status" -eq 0 ]
+  first="$(cat "$PASSWORD_FILE")"
+  rm -f "$PASSWORD_FILE"
+  run run_install
+  [ "$status" -eq 0 ]
+  [ "$first" != "$(cat "$PASSWORD_FILE")" ]
+}
+
+@test "a chosen password under 12 characters is rejected" {
+  seed_cert
+  run run_install_pw "short" "short" "long enough pw" "long enough pw"
+  [ "$status" -eq 0 ]
+  assert_contains "$output" "at least 12"
+  [ "$(cat "$PASSWORD_FILE")" = "long enough pw" ]
+}
+
+@test "a chosen password keeps its leading and trailing spaces" {
+  seed_cert
+  run run_install_pw "  spaces  kept  " "  spaces  kept  "
+  [ "$status" -eq 0 ]
+  [ "$(cat "$PASSWORD_FILE")" = "  spaces  kept  " ]
+}
+
+@test "asking for a password with no input fails loudly" {
+  seed_cert
+  run bash -c "HOME='$TEST_HOME' '$REPO_ROOT/install.sh' --password </dev/null"
+  [ "$status" -ne 0 ]
+  assert_contains "$output" "no password given"
+  [ ! -f "$PASSWORD_FILE" ]
+}
+
+@test "an unknown flag is refused" {
+  seed_cert
+  run bash -c "HOME='$TEST_HOME' '$REPO_ROOT/install.sh' --nope"
+  [ "$status" -ne 0 ]
+  assert_contains "$output" "unknown option"
 }
