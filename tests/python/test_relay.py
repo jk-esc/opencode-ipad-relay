@@ -812,3 +812,28 @@ def test_refusals_are_logged(always_replies, relay_to, caplog) -> None:
         assert "refus" in caplog.text.lower(), caplog.text
     finally:
         held.close()
+
+
+# --------------------------------------------------------------------------- #
+# Configuration
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("value", ["not-a-number", "70000", "0", "-1", "80.5"])
+def test_a_bad_port_in_the_environment_is_explained(value: str) -> None:
+    """A typo in an override should say so, not print a traceback."""
+    with pytest.raises(SystemExit) as excinfo:
+        relay.port_from_env("OPENCODE_WEB_PROXY_PORT", value, 443)
+    message = str(excinfo.value.code)
+    assert "OPENCODE_WEB_PROXY_PORT" in message
+    assert value in message
+
+
+@pytest.mark.parametrize("value,expected", [("443", 443), ("8443", 8443)])
+def test_a_good_port_in_the_environment_is_used(value: str, expected: int) -> None:
+    assert relay.port_from_env("X", value, 443) == expected
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_an_unset_override_falls_back_to_the_default(value: str | None) -> None:
+    assert relay.port_from_env("X", value, 443) == 443
