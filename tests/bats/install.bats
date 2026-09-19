@@ -72,10 +72,15 @@ seed_cert() {
   local cache="$BATS_SUITE_TMPDIR/seed-cert"
   if [ ! -f "$cache/cert.pem" ]; then
     mkdir -p "$cache"
+    # Same shape as the one the installer makes, so a seeded install looks
+    # like an up-to-date one; only the key size and lifetime differ.
     openssl req -x509 -newkey rsa:2048 -nodes \
-      -keyout "$cache/key.pem" -out "$cache/cert.pem" -days 1 \
+      -keyout "$cache/key.pem" -out "$cache/cert.pem" -days 30 \
       -subj "/CN=opencode.local" \
-      -addext "subjectAltName=DNS:opencode.local" >/dev/null 2>&1
+      -addext "subjectAltName=DNS:opencode.local,DNS:$(scutil --get LocalHostName).local" \
+      -addext "extendedKeyUsage=serverAuth" \
+      -addext "keyUsage=digitalSignature,keyEncipherment" \
+      -addext "basicConstraints=critical,CA:TRUE" >/dev/null 2>&1
   fi
   mkdir -p "$DATA_DIR"
   chmod 700 "$DATA_DIR"
@@ -456,4 +461,126 @@ assert_dead() {
   run bash -c "HOME='$TEST_HOME' '$REPO_ROOT/install.sh' --nope"
   [ "$status" -ne 0 ]
   assert_contains "$output" "unknown option"
+}
+
+# --- certificate --------------------------------------------------------------
+#
+# Apple publishes rules for certificates iOS and macOS will trust
+# (support.apple.com/103769): SHA-2, a DNS name in subjectAltName, an
+# extendedKeyUsage of serverAuth, and at most 825 days. The old certificate
+# met the first two and neither of the others.
+
+@test "certificate carries the serverAuth purpose Apple asks for" {
+  run run_install
+  [ "$status" -eq 0 ]
+  text="$(openssl x509 -in "$CERT_FILE" -noout -text)"
+  assert_contains "$text" "TLS Web Server Authentication"
+}
+
+@test "certificate is valid for no more than 825 days" {
+  run run_install
+  [ "$status" -eq 0 ]
+  # 826 days from now must be past its expiry.
+  run openssl x509 -in "$CERT_FILE" -noout -checkend 71366400
+  [ "$status" -ne 0 ]
+  # ...but it should still be good for a year.
+  run openssl x509 -in "$CERT_FILE" -noout -checkend 31536000
+  [ "$status" -eq 0 ]
+}
+
+@test "certificate names this Mac as well as opencode.local" {
+  run run_install
+  [ "$status" -eq 0 ]
+  san="$(openssl x509 -in "$CERT_FILE" -noout -ext subjectAltName)"
+  assert_contains "$san" "DNS:opencode.local"
+  assert_contains "$san" "DNS:$(scutil --get LocalHostName).local"
+}
+
+@test "certificate has no IP address in it" {
+  # It used to pin whatever en0 happened to be, which is wrong as soon as
+  # you join another network, and was 127.0.0.1 on any Mac not using en0.
+  run run_install
+  [ "$status" -eq 0 ]
+  san="$(openssl x509 -in "$CERT_FILE" -noout -ext subjectAltName)"
+  assert_not_contains "$san" "IP Address"
+}
+
+@test "private key is never briefly world-readable" {
+  # LibreSSL, which is what Apple ships, writes the key 0644 and the
+  # installer chmods it afterwards. Check it is born private instead.
+  run bash -c "umask 022; HOME='$TEST_HOME' '$REPO_ROOT/install.sh' </dev/null"
+  [ "$status" -eq 0 ]
+  [ "$(stat -f '%Lp' "$KEY_FILE")" = "600" ]
+}
+
+@test "an old-style certificate is spotted and replaced" {
+  run run_install
+  [ "$status" -eq 0 ]
+  # Replace it with one generated the old way: ten years, no serverAuth.
+  openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout "$KEY_FILE" -out "$CERT_FILE" -days 3650 \
+    -subj "/CN=opencode.local" \
+    -addext "subjectAltName=DNS:opencode.local,IP:10.0.0.1" >/dev/null 2>&1
+  old="$(shasum "$CERT_FILE")"
+  run bash -c "printf 'y\n' | HOME='$TEST_HOME' '$REPO_ROOT/install.sh'"
+  [ "$status" -eq 0 ]
+  assert_contains "$output" "certificate"
+  [ "$(shasum "$CERT_FILE")" != "$old" ]
+  text="$(openssl x509 -in "$CERT_FILE" -noout -text)"
+  assert_contains "$text" "TLS Web Server Authentication"
+}
+
+@test "declining to replace an old certificate keeps it" {
+  run run_install
+  [ "$status" -eq 0 ]
+  openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout "$KEY_FILE" -out "$CERT_FILE" -days 3650 \
+    -subj "/CN=opencode.local" \
+    -addext "subjectAltName=DNS:opencode.local" >/dev/null 2>&1
+  old="$(shasum "$CERT_FILE")"
+  run bash -c "printf 'n\n' | HOME='$TEST_HOME' '$REPO_ROOT/install.sh'"
+  [ "$status" -eq 0 ]
+  [ "$(shasum "$CERT_FILE")" = "$old" ]
+}
+
+@test "a good certificate is left alone on re-install" {
+  run run_install
+  [ "$status" -eq 0 ]
+  old="$(shasum "$CERT_FILE")"
+  run run_install
+  [ "$status" -eq 0 ]
+  assert_contains "$output" "certificate already exists"
+  [ "$(shasum "$CERT_FILE")" = "$old" ]
+}
+
+@test "launcher warns when the certificate is nearly expired" {
+  run run_install
+  [ "$status" -eq 0 ]
+  stub_launcher_deps
+  stub_mdns_deps
+  openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout "$KEY_FILE" -out "$CERT_FILE" -days 5 \
+    -subj "/CN=opencode.local" \
+    -addext "subjectAltName=DNS:opencode.local" >/dev/null 2>&1
+  run "$BIN_DIR/opencode-web"
+  assert_contains "$output" "expire"
+}
+
+@test "launcher refuses to start with an expired certificate" {
+  run run_install
+  [ "$status" -eq 0 ]
+  stub_launcher_deps
+  stub_mdns_deps
+  # -days 1 with a start date in the past leaves it already expired.
+  faketime_cert="$(mktemp -d)"
+  openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout "$KEY_FILE" -out "$faketime_cert/c.pem" -days 1 \
+    -not_before 20200101000000Z -not_after 20200102000000Z \
+    -subj "/CN=opencode.local" \
+    -addext "subjectAltName=DNS:opencode.local" >/dev/null 2>&1
+  cp "$faketime_cert/c.pem" "$CERT_FILE"
+  rm -rf "$faketime_cert"
+  run "$BIN_DIR/opencode-web"
+  [ "$status" -ne 0 ]
+  assert_contains "$output" "expired"
 }

@@ -147,19 +147,85 @@ fi
 
 # --- 3. Certificate --------------------------------------------------------
 
-if [ -f "$CERT_FILE" ] && [ -f "$KEY_FILE" ]; then
-  echo "[ok] certificate already exists (kept)."
-else
-  LAN_IP="$(ipconfig getifaddr en0 2>/dev/null || echo 127.0.0.1)"
-  openssl req -x509 -newkey rsa:4096 -nodes \
-    -keyout "$KEY_FILE" \
-    -out "$CERT_FILE" \
-    -days 3650 \
-    -subj "/CN=opencode.local" \
-    -addext "subjectAltName=DNS:opencode.local,IP:$LAN_IP"
+# Apple publishes what iOS and macOS require of a certificate they will
+# trust (support.apple.com/103769): SHA-2, a DNS name in subjectAltName, an
+# extendedKeyUsage of serverAuth, and 825 days or fewer. Whether iPadOS
+# enforces the last two for a self-signed certificate you installed
+# yourself is not something we can rely on either way, so meet them.
+CERT_DAYS=825
+LOCAL_NAME="$(scutil --get LocalHostName 2>/dev/null || hostname -s).local"
+
+generate_cert() {
+  # umask, not a chmod afterwards: LibreSSL, which is what Apple ships,
+  # writes the key 0644 and leaves it that way until we fix it.
+  (
+    umask 077
+    openssl req -x509 -newkey rsa:4096 -nodes \
+      -keyout "$KEY_FILE" \
+      -out "$CERT_FILE" \
+      -days "$CERT_DAYS" \
+      -subj "/CN=opencode.local" \
+      -addext "subjectAltName=DNS:opencode.local,DNS:$LOCAL_NAME" \
+      -addext "extendedKeyUsage=serverAuth" \
+      -addext "keyUsage=digitalSignature,keyEncipherment" \
+      -addext "basicConstraints=critical,CA:TRUE" 2>/dev/null
+  )
   chmod 600 "$KEY_FILE"
   chmod 644 "$CERT_FILE"
-  echo "[ok] generated self-signed certificate (10 years, CN=opencode.local, IP SAN $LAN_IP)."
+  echo "[ok] generated a certificate for opencode.local and $LOCAL_NAME,"
+  echo "     good for $CERT_DAYS days."
+}
+
+is_yes() {
+  case "$1" in
+  y | Y | yes | YES) return 0 ;;
+  esac
+  return 1
+}
+
+# Why an existing certificate would need replacing, or empty if it's fine.
+cert_complaint() {
+  local text
+  text="$(openssl x509 -in "$CERT_FILE" -noout -text 2>/dev/null)" || {
+    echo "it cannot be read"
+    return
+  }
+  case "$text" in
+  *"TLS Web Server Authentication"*) ;;
+  *)
+    echo "it has no serverAuth purpose, which Apple requires"
+    return
+    ;;
+  esac
+  # 825 days from now: anything still valid then is longer-lived than allowed.
+  if openssl x509 -in "$CERT_FILE" -noout -checkend 71280000 >/dev/null 2>&1; then
+    echo "it lasts longer than the 825 days Apple allows"
+    return
+  fi
+  case "$text" in
+  *"IP Address:"*)
+    echo "it pins an IP address that will go stale"
+    return
+    ;;
+  esac
+}
+
+if [ ! -f "$CERT_FILE" ] || [ ! -f "$KEY_FILE" ]; then
+  generate_cert
+else
+  complaint="$(cert_complaint)"
+  if [ -z "$complaint" ]; then
+    echo "[ok] certificate already exists (kept)."
+  else
+    echo "Your certificate needs replacing: $complaint."
+    echo "You will have to install and trust the new one on your iPad."
+    printf "Replace it now? [y/N] "
+    if IFS= read -r reply && is_yes "$reply"; then
+      generate_cert
+    else
+      echo "[kept] certificate left as it is."
+    fi
+  fi
 fi
 
 # --- 4. Scripts ------------------------------------------------------------
