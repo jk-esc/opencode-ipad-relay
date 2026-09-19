@@ -3,8 +3,10 @@ name: CI
 on:
   push:
     branches: [main]
+  # Every pull request, not only those aimed at main: work is often split
+  # into a stack of small PRs, each based on the one before, and those were
+  # getting no checks at all until they were retargeted.
   pull_request:
-    branches: [main]
 
 permissions:
   contents: read
