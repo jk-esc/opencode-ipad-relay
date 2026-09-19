@@ -32,3 +32,5 @@ SHA256SUMS.txt
 # Notes, plans and scratch files. Only the README ships.
 *.md
 !README.md
+# Local working plan (maintainer-only, not shipped)
+IMPROVEMENT_PLAN.md
