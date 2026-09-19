@@ -16,15 +16,30 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # Both tools are downloaded and checked against a known hash. The
+      # previous version piped a script from a branch straight into sudo
+      # bash, and took the shfmt binary on trust.
       - name: Install bash lint tools
+        env:
+          SHFMT_VERSION: 3.11.0
+          SHFMT_SHA256: 1904ec6bac715c1d05cd7f6612eec8f67a625c3749cb327e5bfb4127d09035ff
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
         run: |
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y shellcheck
-          # shfmt
-          curl -sSLo /tmp/shfmt https://github.com/mvdan/sh/releases/download/v3.11.0/shfmt_v3.11.0_linux_amd64
+
+          curl -sSfLo /tmp/shfmt \
+            "https://github.com/mvdan/sh/releases/download/v${SHFMT_VERSION}/shfmt_v${SHFMT_VERSION}_linux_amd64"
+          echo "${SHFMT_SHA256}  /tmp/shfmt" | sha256sum -c -
           sudo install -m 0755 /tmp/shfmt /usr/local/bin/shfmt
-          # actionlint
-          curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash | sudo bash -s -- 1.7.12 /usr/local/bin
+
+          curl -sSfLo /tmp/actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  /tmp/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          sudo install -m 0755 /tmp/actionlint /usr/local/bin/actionlint
 
       - name: shellcheck
         run: shellcheck install.sh uninstall.sh src/opencode-web scripts/check.sh
@@ -67,7 +82,7 @@ jobs:
 
       - name: bandit
         run: |
-          pip install bandit==1.8.3
+          pip install -r requirements-dev.txt
           bandit -r src/ -q
 
       - name: gitleaks
