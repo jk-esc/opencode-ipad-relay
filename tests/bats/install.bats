@@ -64,6 +64,26 @@ assert_not_contains() { # assert_not_contains "$haystack" "$needle"
   return 0
 }
 
+# Generating the real 4096-bit key takes seconds, and most tests only need
+# the installer to get past that step. Make one cheap certificate per suite
+# and drop it in; the tests that actually inspect the certificate skip this
+# and let the installer generate a real one.
+seed_cert() {
+  local cache="$BATS_SUITE_TMPDIR/seed-cert"
+  if [ ! -f "$cache/cert.pem" ]; then
+    mkdir -p "$cache"
+    openssl req -x509 -newkey rsa:2048 -nodes \
+      -keyout "$cache/key.pem" -out "$cache/cert.pem" -days 1 \
+      -subj "/CN=opencode.local" \
+      -addext "subjectAltName=DNS:opencode.local" >/dev/null 2>&1
+  fi
+  mkdir -p "$DATA_DIR"
+  chmod 700 "$DATA_DIR"
+  cp "$cache/cert.pem" "$cache/key.pem" "$DATA_DIR/"
+  chmod 600 "$DATA_DIR/key.pem"
+  chmod 644 "$DATA_DIR/cert.pem"
+}
+
 run_install() {
   printf '%s\n' "$@" | "$REPO_ROOT/install.sh"
 }
@@ -79,6 +99,7 @@ run_install() {
 }
 
 @test "password file is mode 600 and contains the chosen password" {
+  seed_cert
   run run_install "secret-pw" "secret-pw"
   [ "$status" -eq 0 ]
   perms="$(stat -f '%Lp' "$PASSWORD_FILE")"
@@ -103,6 +124,7 @@ run_install() {
 }
 
 @test "installer is idempotent: re-run keeps files, no re-prompt" {
+  seed_cert
   run run_install "secret-pw" "secret-pw"
   [ "$status" -eq 0 ]
   cert_before="$(shasum "$CERT_FILE")"
@@ -118,6 +140,7 @@ run_install() {
 }
 
 @test "mismatched passwords are rejected and re-prompted" {
+  seed_cert
   run run_install "one" "two" "three" "three"
   [ "$status" -eq 0 ]
   assert_contains "$output" "passwords do not match"
@@ -125,6 +148,7 @@ run_install() {
 }
 
 @test "empty password is rejected" {
+  seed_cert
   run run_install "" "valid" "valid"
   [ "$status" -eq 0 ]
   assert_contains "$output" "password cannot be empty"
@@ -132,6 +156,7 @@ run_install() {
 }
 
 @test "launcher errors clearly when password file is missing" {
+  seed_cert
   # Install scripts but not password: create scripts via a full install, then
   # delete the password file and invoke the launcher directly.
   run run_install "secret-pw" "secret-pw"
@@ -143,6 +168,7 @@ run_install() {
 }
 
 @test "uninstall removes scripts but keeps data dir when answered 'n'" {
+  seed_cert
   run run_install "secret-pw" "secret-pw"
   [ "$status" -eq 0 ]
   run bash -c "printf 'n\n' | HOME='$TEST_HOME' '$REPO_ROOT/uninstall.sh'"
@@ -154,6 +180,7 @@ run_install() {
 }
 
 @test "uninstall removes data dir when answered 'y'" {
+  seed_cert
   run run_install "secret-pw" "secret-pw"
   [ "$status" -eq 0 ]
   run bash -c "printf 'y\n' | HOME='$TEST_HOME' '$REPO_ROOT/uninstall.sh'"
@@ -176,9 +203,11 @@ printf '%s\n' "$@" >"$HOME/opencode.args"
 exec >/dev/null 2>&1
 exec sleep 60
 EOF2
+  # The fake backend counts as listening only once it has really started,
+  # so the launcher's readiness loop can't race ahead of it.
   cat >"$STUB_BIN/lsof" <<'EOF2'
 #!/bin/bash
-exit 0
+[ -f "$HOME/opencode.args" ]
 EOF2
   cat >"$STUB_BIN/caffeinate" <<'EOF2'
 #!/bin/bash
@@ -193,6 +222,7 @@ EOF2
 }
 
 @test "launcher binds the backend to loopback only (no LAN-facing plain HTTP)" {
+  seed_cert
   run run_install "secret-pw" "secret-pw"
   [ "$status" -eq 0 ]
   stub_launcher_deps
@@ -226,6 +256,7 @@ EOF2
 }
 
 @test "launcher advertises opencode.local via dns-sd with the LAN IPv4" {
+  seed_cert
   run run_install "secret-pw" "secret-pw"
   [ "$status" -eq 0 ]
   stub_launcher_deps
@@ -237,6 +268,7 @@ EOF2
 }
 
 @test "launcher stops the dns-sd advertisement when it exits" {
+  seed_cert
   run run_install "secret-pw" "secret-pw"
   [ "$status" -eq 0 ]
   stub_launcher_deps
@@ -249,6 +281,7 @@ EOF2
 }
 
 @test "launcher still starts, with a warning, when the LAN IPv4 cannot be determined" {
+  seed_cert
   run run_install "secret-pw" "secret-pw"
   [ "$status" -eq 0 ]
   stub_launcher_deps
@@ -272,6 +305,7 @@ assert_dead() {
 }
 
 @test "launcher records the PIDs of everything it starts" {
+  seed_cert
   run run_install "secret-pw" "secret-pw"
   [ "$status" -eq 0 ]
   stub_launcher_deps
@@ -291,6 +325,7 @@ assert_dead() {
 }
 
 @test "kill -TERM on the launcher stops opencode, dns-sd and the relay" {
+  seed_cert
   run run_install "secret-pw" "secret-pw"
   [ "$status" -eq 0 ]
   stub_launcher_deps
@@ -314,6 +349,7 @@ assert_dead() {
 }
 
 @test "launcher fails fast when opencode dies before it is ready" {
+  seed_cert
   run run_install "secret-pw" "secret-pw"
   [ "$status" -eq 0 ]
   stub_launcher_deps
@@ -326,6 +362,7 @@ assert_dead() {
 }
 
 @test "launcher exits with the relay's status" {
+  seed_cert
   run run_install "secret-pw" "secret-pw"
   [ "$status" -eq 0 ]
   stub_launcher_deps
@@ -336,6 +373,7 @@ assert_dead() {
 }
 
 @test "uninstall stops the processes listed in run.pid" {
+  seed_cert
   run run_install "secret-pw" "secret-pw"
   [ "$status" -eq 0 ]
   sleep 60 >/dev/null 2>&1 &
@@ -348,6 +386,7 @@ assert_dead() {
 }
 
 @test "uninstall does not kill by process-name pattern" {
+  seed_cert
   # pkill -f matches any command line containing the pattern, which can hit
   # an editor or pager that merely has the file open. The uninstaller must
   # only ever kill PIDs it recorded itself.
