@@ -175,13 +175,38 @@ def _http_get(port: int, path: str) -> tuple[int, bytes]:
 # --------------------------------------------------------------------------- #
 
 
-def test_tls_serves_opencode_local_cert(relay_server: int) -> None:
-    with _tls_connect(relay_server) as sock:
-        cert = sock.getpeercert(binary_form=False)
-        # CERT_NONE -> getpeercert() is {} unless binary_form; use cipher check too.
-        assert sock.cipher() is not None
-    # Verify the cert subject via binary parse is out of scope; ensure handshake ok.
-    assert isinstance(cert, dict)
+def test_tls_serves_the_opencode_local_certificate(
+    relay_server: int, cert: tuple[str, str]
+) -> None:
+    """Verify the certificate the way an iPad that trusts it would.
+
+    This used to assert isinstance({}, dict), which is true whatever the
+    relay serves, because getpeercert() returns {} when verification is off.
+    """
+    certfile, _ = cert
+    ctx = ssl.create_default_context(cafile=certfile)
+    ctx.check_hostname = True
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    raw = socket.create_connection(("127.0.0.1", relay_server), timeout=10)
+    with ctx.wrap_socket(raw, server_hostname="opencode.local") as sock:
+        peer = sock.getpeercert()
+        assert peer, "verified connection should expose the certificate"
+        names = {
+            value for kind, value in peer.get("subjectAltName", ()) if kind == "DNS"
+        }
+        assert "opencode.local" in names, peer
+
+
+def test_a_certificate_for_another_name_is_rejected(
+    relay_server: int, cert: tuple[str, str]
+) -> None:
+    """Proves the check above is doing something."""
+    certfile, _ = cert
+    ctx = ssl.create_default_context(cafile=certfile)
+    raw = socket.create_connection(("127.0.0.1", relay_server), timeout=10)
+    with pytest.raises(ssl.CertificateError):
+        ctx.wrap_socket(raw, server_hostname="not-opencode.local")
+    raw.close()
 
 
 def test_get_root_passthrough(relay_server: int) -> None:
@@ -234,14 +259,67 @@ def test_concurrent_connections(relay_server: int) -> None:
     )
 
 
-def test_tls_1_1_rejected(relay_server: int) -> None:
+def _obsolete_tls_client() -> ssl.SSLContext:
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
+    ctx.set_ciphers("ALL:@SECLEVEL=0")
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_1
     ctx.maximum_version = ssl.TLSVersion.TLSv1_1
+    return ctx
+
+
+def test_the_obsolete_client_can_actually_speak_tls_1_1(
+    cert: tuple[str, str],
+) -> None:
+    """Check the test below is a real test.
+
+    The old version of it built a TLS 1.1-only client and expected an
+    SSLError. It got one -- from the client's own library, before a single
+    byte was sent. It passed no matter what the relay allowed. So first
+    prove this client can complete a 1.1 handshake against a server that
+    permits one.
+    """
+    certfile, keyfile = cert
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_1
+    ctx.set_ciphers("ALL:@SECLEVEL=0")
+    ctx.load_cert_chain(certfile, keyfile)
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    negotiated: list[str | None] = []
+
+    def serve() -> None:
+        conn, _ = listener.accept()
+        try:
+            with ctx.wrap_socket(conn, server_side=True) as tls:
+                negotiated.append(tls.version())
+        except OSError:
+            negotiated.append(None)
+
+    threading.Thread(target=serve, daemon=True).start()
+    raw = socket.create_connection(listener.getsockname(), timeout=10)
+    try:
+        with _obsolete_tls_client().wrap_socket(raw, server_hostname="x") as sock:
+            assert sock.version() == "TLSv1.1"
+    finally:
+        listener.close()
+    time.sleep(0.2)
+    assert negotiated == ["TLSv1.1"]
+
+
+def test_tls_1_1_is_rejected(relay_server: int) -> None:
+    """A client stuck on TLS 1.1 must not get in."""
+    raw = socket.create_connection(("127.0.0.1", relay_server), timeout=10)
     with pytest.raises(ssl.SSLError):
-        raw = socket.create_connection(("127.0.0.1", relay_server), timeout=10)
-        ctx.wrap_socket(raw, server_hostname="opencode.local")
+        _obsolete_tls_client().wrap_socket(raw, server_hostname="opencode.local")
+    raw.close()
+
+
+def test_the_protocol_floor_is_set(relay_server: int) -> None:
+    context = relay.build_context(*_CERT_FOR_POLICY)
+    assert context.minimum_version == ssl.TLSVersion.TLSv1_2
 
 
 def test_backend_down_closes_cleanly(
@@ -259,12 +337,13 @@ def test_backend_down_closes_cleanly(
         with _tls_connect(port) as sock:
             sock.settimeout(5)
             sock.sendall(b"GET / HTTP/1.0\r\n\r\n")
-            # Backend is down -> relay closes client side; recv returns b"" or raises.
+            # The relay must hang up promptly, not leave the page hanging.
+            started = time.monotonic()
             try:
-                data = sock.recv(1024)
-                assert data == b""
+                assert sock.recv(1024) == b""
             except (ssl.SSLError, ConnectionResetError, BrokenPipeError):
                 pass
+            assert time.monotonic() - started < 2
     finally:
         server.shutdown()
         server.server_close()
