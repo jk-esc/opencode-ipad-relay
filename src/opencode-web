@@ -22,6 +22,22 @@ lan_ip() {
   ipconfig getifaddr "$iface" 2>/dev/null
 }
 
+# An expired certificate fails on the iPad with a warning that looks like
+# an attack, so say plainly what happened instead.
+CERT_FILE="$DATA_DIR/cert.pem"
+if [ -f "$CERT_FILE" ]; then
+  if ! openssl x509 -in "$CERT_FILE" -noout -checkend 0 >/dev/null 2>&1; then
+    echo "error: the certificate has expired. Re-run install.sh to make a new" >&2
+    echo "       one, then install and trust it on your iPad again." >&2
+    exit 1
+  fi
+  if ! openssl x509 -in "$CERT_FILE" -noout -checkend 2592000 >/dev/null 2>&1; then
+    echo "warning: the certificate will expire within a month. Re-run install.sh"
+    echo "         to replace it, then re-trust it on your iPad."
+    echo ""
+  fi
+fi
+
 echo "Starting opencode web (loopback-only backend, password-protected)..."
 
 # The backend must never be reachable from the LAN: only the TLS relay is.
