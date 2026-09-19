@@ -29,14 +29,21 @@ echo "Starting opencode web (loopback-only backend, password-protected)..."
 OPENCODE_SERVER_PASSWORD="$PASSWORD" caffeinate -i opencode web --hostname 127.0.0.1 --port "$PORT" &
 OPENCODE_PID=$!
 MDNS_PID=""
+RELAY_PID=""
+PID_FILE="$DATA_DIR/run.pid"
 
+# shellcheck disable=SC2329  # invoked via the EXIT trap
 cleanup() {
-  kill "$OPENCODE_PID" 2>/dev/null || true
-  if [ -n "$MDNS_PID" ]; then
-    kill "$MDNS_PID" 2>/dev/null || true
-  fi
+  for pid in "$RELAY_PID" "$MDNS_PID" "$OPENCODE_PID"; do
+    if [ -n "$pid" ]; then
+      kill "$pid" 2>/dev/null || true
+    fi
+  done
+  rm -f "$PID_FILE"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # opencode only publishes mDNS for a LAN-facing listener, so the launcher
 # advertises opencode.local itself with the stock dns-sd(1) proxy mode
@@ -51,6 +58,10 @@ else
 fi
 
 for _ in $(seq 1 20); do
+  if ! kill -0 "$OPENCODE_PID" 2>/dev/null; then
+    echo "error: opencode exited before it was ready — is port $PORT already in use?" >&2
+    exit 1
+  fi
   if lsof -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
     break
   fi
@@ -67,4 +78,19 @@ echo "  iPad (this network): https://$MDNS_NAME$URL_PORT"
 echo "                       https://$LOCAL_NAME$URL_PORT  (fallback name)"
 echo ""
 
-python3 "$HOME/.local/bin/opencode-web-proxy.py"
+# The relay runs in the background and we wait on it: bash only delivers
+# signals to traps between foreground commands, so a foreground relay would
+# make `kill <launcher>` a no-op until the relay ended on its own.
+python3 "$HOME/.local/bin/opencode-web-proxy.py" &
+RELAY_PID=$!
+
+{
+  echo "$$"
+  echo "$OPENCODE_PID"
+  if [ -n "$MDNS_PID" ]; then echo "$MDNS_PID"; fi
+  echo "$RELAY_PID"
+} >"$PID_FILE"
+
+STATUS=0
+wait "$RELAY_PID" || STATUS=$?
+exit "$STATUS"
