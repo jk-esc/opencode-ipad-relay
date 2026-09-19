@@ -37,6 +37,33 @@ teardown() {
   rm -rf "$TEST_HOME" "$STUB_BIN"
 }
 
+# --- assertion helpers --------------------------------------------------------
+#
+# bats runs under /bin/bash 3.2 on macOS, where `set -e` does NOT exit on a
+# failing `[[ ... ]]` (and the ERR trap does not fire either). A `[[` assertion
+# therefore only counts if it is the very last command of a test. These helpers
+# are plain functions, whose non-zero return *does* trip `set -e`.
+
+assert_contains() { # assert_contains "$haystack" "$needle"
+  case "$1" in
+  *"$2"*) return 0 ;;
+  esac
+  echo "assert_contains: expected to find [$2] in:" >&2
+  echo "$1" >&2
+  return 1
+}
+
+assert_not_contains() { # assert_not_contains "$haystack" "$needle"
+  case "$1" in
+  *"$2"*)
+    echo "assert_not_contains: did not expect [$2] in:" >&2
+    echo "$1" >&2
+    return 1
+    ;;
+  esac
+  return 0
+}
+
 run_install() {
   printf '%s\n' "$@" | "$REPO_ROOT/install.sh"
 }
@@ -70,9 +97,9 @@ run_install() {
   run run_install "secret-pw" "secret-pw"
   [ "$status" -eq 0 ]
   subject="$(openssl x509 -in "$CERT_FILE" -noout -subject)"
-  [[ "$subject" == *"opencode.local"* ]]
+  assert_contains "$subject" "opencode.local"
   san="$(openssl x509 -in "$CERT_FILE" -noout -ext subjectAltName)"
-  [[ "$san" == *"opencode.local"* ]]
+  assert_contains "$san" "opencode.local"
 }
 
 @test "installer is idempotent: re-run keeps files, no re-prompt" {
@@ -84,8 +111,8 @@ run_install() {
   # Second run with different piped input must NOT change anything.
   run run_install "different" "different"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"password already set (kept)"* ]]
-  [[ "$output" == *"certificate already exists (kept)"* ]]
+  assert_contains "$output" "password already set (kept)"
+  assert_contains "$output" "certificate already exists (kept)"
   [ "$(shasum "$CERT_FILE")" = "$cert_before" ]
   [ "$(shasum "$PASSWORD_FILE")" = "$pw_before" ]
 }
@@ -93,14 +120,14 @@ run_install() {
 @test "mismatched passwords are rejected and re-prompted" {
   run run_install "one" "two" "three" "three"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"passwords do not match"* ]]
+  assert_contains "$output" "passwords do not match"
   [ "$(cat "$PASSWORD_FILE")" = "three" ]
 }
 
 @test "empty password is rejected" {
   run run_install "" "valid" "valid"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"password cannot be empty"* ]]
+  assert_contains "$output" "password cannot be empty"
   [ "$(cat "$PASSWORD_FILE")" = "valid" ]
 }
 
@@ -112,7 +139,7 @@ run_install() {
   rm -f "$PASSWORD_FILE"
   run "$BIN_DIR/opencode-web"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"password file not found"* || "$output" == *"run install.sh first"* ]]
+  assert_contains "$output" "run install.sh first"
 }
 
 @test "uninstall removes scripts but keeps data dir when answered 'n'" {
