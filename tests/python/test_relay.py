@@ -100,6 +100,15 @@ class _BackendHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+_CERT_FOR_POLICY: tuple[str, str] = ("", "")
+
+
+@pytest.fixture(autouse=True)
+def _remember_cert(cert: tuple[str, str]) -> None:
+    global _CERT_FOR_POLICY
+    _CERT_FOR_POLICY = cert
+
+
 @pytest.fixture()
 def backend() -> tuple[str, int]:
     """Start the mock HTTP backend on an ephemeral port; yield (host, port)."""
@@ -517,6 +526,7 @@ def always_replies():
                     conn, _ = listener.accept()
                 except OSError:
                     return
+
                 def talk(conn: socket.socket = conn) -> None:
                     try:
                         while conn.recv(4096):
@@ -647,3 +657,45 @@ def test_successful_requests_never_lock_anyone_out(always_replies, relay_to) -> 
     port = relay_to(always_replies(OK), auth_failures=2, new_per_minute=99)
     for _ in range(6):
         assert b"200 OK" in _attempt(port)
+
+
+# --------------------------------------------------------------------------- #
+# TLS policy
+# --------------------------------------------------------------------------- #
+
+
+def test_only_strong_ciphers_are_offered(relay_server: int) -> None:
+    """Apple's stock python3 links an OpenSSL whose defaults include CBC and
+    SHA-1 suites, so the relay has to name what it will accept."""
+    context = relay.build_context(*_CERT_FOR_POLICY)
+    offered = [c["name"] for c in context.get_ciphers()]
+    assert offered, "no ciphers at all would mean nothing can connect"
+    for name in offered:
+        assert "CBC" not in name, name
+        assert "RC4" not in name and "3DES" not in name and "DES-" not in name, name
+        assert "CAMELLIA" not in name, name
+        assert not name.endswith("-SHA"), f"SHA-1 suite offered: {name}"
+    assert all(
+        ("GCM" in n or "CHACHA20" in n or n.startswith("TLS_")) for n in offered
+    ), offered
+
+
+def test_forward_secrecy_is_required(relay_server: int) -> None:
+    """No static-RSA key exchange: a stolen key must not decrypt old traffic."""
+    context = relay.build_context(*_CERT_FOR_POLICY)
+    for cipher in context.get_ciphers():
+        name = cipher["name"]
+        if name.startswith("TLS_"):
+            continue  # TLS 1.3 is always ephemeral
+        assert name.startswith(("ECDHE", "DHE")), f"not forward secret: {name}"
+
+
+def test_old_python_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "version_info", (3, 8, 0, "final", 0))
+    with pytest.raises(SystemExit) as excinfo:
+        relay.require_supported_python()
+    assert "3.9" in str(excinfo.value.code)
+
+
+def test_current_python_is_accepted() -> None:
+    relay.require_supported_python()
