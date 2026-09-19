@@ -48,7 +48,8 @@ MDNS_PID=""
 RELAY_PID=""
 PID_FILE="$DATA_DIR/run.pid"
 
-# shellcheck disable=SC2329  # invoked via the EXIT trap
+# Only ever run by the EXIT trap, which shellcheck can't see.
+# shellcheck disable=SC2317,SC2329
 cleanup() {
   for pid in "$RELAY_PID" "$MDNS_PID" "$OPENCODE_PID"; do
     if [ -n "$pid" ]; then
