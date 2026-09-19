@@ -9,12 +9,15 @@ which the opencode web UI requires.
 
 from __future__ import annotations
 
+import collections
+import dataclasses
 import os
 import select
 import socket
 import socketserver
 import ssl
 import sys
+import threading
 import time
 
 CERT_DIR = os.path.expanduser("~/.local/share/opencode-web")
@@ -34,6 +37,20 @@ IDLE_TIMEOUT = 900.0
 MAX_BUFFER = 1024 * 1024
 # How often an otherwise quiet connection re-checks its idle deadline.
 POLL_INTERVAL = 1.0
+RATE_WINDOW = 60.0
+
+
+@dataclasses.dataclass(frozen=True)
+class Limits:
+    """What one relay is willing to serve at once.
+
+    A browser opens a handful of connections per page, so these are far
+    above normal use and only bite when something is hammering the relay.
+    """
+
+    max_connections: int = 64
+    max_per_ip: int = 16
+    new_per_minute: int = 30
 
 
 class RelayHandler(socketserver.BaseRequestHandler):
@@ -209,6 +226,63 @@ class ThreadingTLSServer(socketserver.ThreadingTCPServer):
     context: ssl.SSLContext
     handshake_timeout: float
     idle_timeout: float
+    limits: Limits
+
+    def _init_limits(self, limits: Limits) -> None:
+        self.limits = limits
+        self._lock = threading.Lock()
+        self._live_total = 0
+        self._live_by_ip: collections.Counter[str] = collections.Counter()
+        self._recent: dict[str, collections.deque[float]] = {}
+
+    @staticmethod
+    def _peer_ip(client_address: tuple[str, int] | str) -> str:
+        return (
+            client_address[0] if isinstance(client_address, tuple) else client_address
+        )
+
+    def verify_request(
+        self,
+        request: socket.socket | tuple[bytes, socket.socket],
+        client_address: tuple[str, int] | str,
+    ) -> bool:
+        """Decide whether to serve this connection, before any TLS.
+
+        This runs on the accept thread, so a refusal costs us a socket close
+        and nothing else -- no handshake, no key exchange, no thread. The
+        peer sees the connection drop.
+        """
+        ip = self._peer_ip(client_address)
+        now = time.monotonic()
+        with self._lock:
+            recent = self._recent.setdefault(ip, collections.deque())
+            while recent and now - recent[0] > RATE_WINDOW:
+                recent.popleft()
+            if len(recent) >= self.limits.new_per_minute:
+                return False
+            if self._live_total >= self.limits.max_connections:
+                return False
+            if self._live_by_ip[ip] >= self.limits.max_per_ip:
+                return False
+            recent.append(now)
+            self._live_total += 1
+            self._live_by_ip[ip] += 1
+        return True
+
+    def process_request_thread(
+        self,
+        request: socket.socket | tuple[bytes, socket.socket],
+        client_address: tuple[str, int] | str,
+    ) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            ip = self._peer_ip(client_address)
+            with self._lock:
+                self._live_total -= 1
+                self._live_by_ip[ip] -= 1
+                if self._live_by_ip[ip] <= 0:
+                    del self._live_by_ip[ip]
 
 
 def build_context(certfile: str, keyfile: str) -> ssl.SSLContext:
@@ -229,6 +303,7 @@ def create_server(
     *,
     handshake_timeout: float = HANDSHAKE_TIMEOUT,
     idle_timeout: float = IDLE_TIMEOUT,
+    limits: Limits | None = None,
 ) -> ThreadingTLSServer:
     """Build a TLS-wrapped relay server (without serving).
 
@@ -241,6 +316,7 @@ def create_server(
     server.context = build_context(certfile, keyfile)
     server.handshake_timeout = handshake_timeout
     server.idle_timeout = idle_timeout
+    server._init_limits(limits or Limits())
     return server
 
 
