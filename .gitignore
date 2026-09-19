@@ -28,3 +28,6 @@ coverage.xml
 dist/
 *.tar.gz
 SHA256SUMS.txt
+
+# Local working plan (maintainer-only, not shipped)
+IMPROVEMENT_PLAN.md
