@@ -6,31 +6,36 @@ on:
       - "v*.*.*"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Build source tarball
         run: |
-          VERSION="${GITHUB_REF_NAME}"
-          NAME="opencode-ipad-relay-${VERSION}"
+          NAME="opencode-ipad-relay-${GITHUB_REF_NAME}"
           # Package exactly the tracked files (no caches, no local secrets).
           git archive --format=tar.gz --prefix="${NAME}/" -o "${NAME}.tar.gz" HEAD
-          shasum -a 256 "${NAME}.tar.gz" > SHA256SUMS.txt
+          shasum -a 256 "${NAME}.tar.gz" >SHA256SUMS.txt
           echo "=== contents ==="
           tar -tzf "${NAME}.tar.gz"
           echo "=== checksums ==="
           cat SHA256SUMS.txt
 
+      # gh is preinstalled on the runner, so there is no third-party action
+      # here to pin, review or keep up to date.
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@72f2c99fcb16243ebadb0990b034d49ad3e18a81 # v2.2.1
-        with:
-          files: |
-            opencode-ipad-relay-*.tar.gz
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            "opencode-ipad-relay-${GITHUB_REF_NAME}.tar.gz" \
             SHA256SUMS.txt
-          generate_release_notes: true
