@@ -197,3 +197,61 @@ EOF2
   assert_contains "$args" "--hostname 127.0.0.1"
   assert_not_contains "$args" "--mdns"
 }
+
+# mDNS stubs: route/ipconfig give a deterministic LAN IPv4; dns-sd records its
+# argv and its own PID, then sleeps so the test can check it was cleaned up.
+stub_mdns_deps() {
+  cat >"$STUB_BIN/route" <<'EOF2'
+#!/bin/bash
+echo "   interface: en0"
+EOF2
+  cat >"$STUB_BIN/ipconfig" <<'EOF2'
+#!/bin/bash
+[ "$1" = "getifaddr" ] && [ "$2" = "en0" ] && echo "192.0.2.10" && exit 0
+exit 1
+EOF2
+  cat >"$STUB_BIN/dns-sd" <<'EOF2'
+#!/bin/bash
+printf '%s\n' "$@" >"$HOME/dns-sd.args"
+echo "$$" >"$HOME/dns-sd.pid"
+sleep 60
+EOF2
+  chmod +x "$STUB_BIN/route" "$STUB_BIN/ipconfig" "$STUB_BIN/dns-sd"
+}
+
+@test "launcher advertises opencode.local via dns-sd with the LAN IPv4" {
+  run run_install "secret-pw" "secret-pw"
+  [ "$status" -eq 0 ]
+  stub_launcher_deps
+  stub_mdns_deps
+  run "$BIN_DIR/opencode-web"
+  [ -f "$HOME/dns-sd.args" ]
+  args="$(tr '\n' ' ' <"$HOME/dns-sd.args")"
+  assert_contains "$args" "-P opencode _https._tcp local 443 opencode.local 192.0.2.10"
+}
+
+@test "launcher stops the dns-sd advertisement when it exits" {
+  run run_install "secret-pw" "secret-pw"
+  [ "$status" -eq 0 ]
+  stub_launcher_deps
+  stub_mdns_deps
+  run "$BIN_DIR/opencode-web"
+  [ -f "$HOME/dns-sd.pid" ]
+  pid="$(cat "$HOME/dns-sd.pid")"
+  sleep 0.5
+  ! kill -0 "$pid" 2>/dev/null
+}
+
+@test "launcher still starts, with a warning, when the LAN IPv4 cannot be determined" {
+  run run_install "secret-pw" "secret-pw"
+  [ "$status" -eq 0 ]
+  stub_launcher_deps
+  stub_mdns_deps
+  printf '#!/bin/bash\nexit 1\n' >"$STUB_BIN/ipconfig"
+  run "$BIN_DIR/opencode-web"
+  [ "$status" -eq 0 ]
+  [ -f "$HOME/opencode.args" ]
+  [ ! -f "$HOME/dns-sd.args" ]
+  assert_contains "$output" "warning"
+  assert_contains "$output" ".local"
+}
