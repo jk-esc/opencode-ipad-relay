@@ -122,21 +122,45 @@ start and advertises `opencode.local` for it. `caffeinate -i` in the launcher
 prevents idle sleep while the server runs (closing the lid still sleeps the
 Mac).
 
-## Security highlights
+## What this protects, and from whom
 
-- ✅ **TLS 1.2 or 1.3** between iPad and Mac — nothing is sniffable on shared
-  Wi-Fi. (1.3 when your `python3` links a TLS 1.3-capable OpenSSL; Apple's
-  stock `python3` negotiates 1.2.)
-- ✅ **Password travels inside TLS**, never as cleartext on the wire
-- ✅ **LAN-only** — nothing is exposed to the internet, nothing to port-forward
-- ✅ **Backend never touches the network** — the launcher starts `opencode web`
-  with `--hostname 127.0.0.1`; the relay is the only LAN-facing listener.
-  Check for yourself: `lsof -nP -iTCP -sTCP:LISTEN`
-- ✅ **Works with Safari's HTTPS-Only Mode fully enabled.** Because this is
-  genuine HTTPS with a certificate your iPad trusts, you never need to weaken
-  your browser's defenses — no "allow insecure content", no exceptions, no
-  downgrades. Security is reinforced, not relaxed.
-- ✅ **No third-party code** — stdlib Python + openssl, already on your Mac
+Start with what you are handing out. `opencode web` can run shell commands
+and edit files on your Mac. Anyone who reaches it with your password has,
+for practical purposes, a terminal on your machine. Everything below exists
+because of that one sentence.
+
+**The attacker this is built for** is someone else on the same network: a
+university or coworking Wi-Fi, a hotel, an airport. They can watch traffic,
+connect to any port on your Mac, and claim any mDNS name they like.
+
+What stops them:
+
+- **Encryption.** TLS between iPad and Mac, so nothing on the Wi-Fi can read
+  your session or your password. TLS 1.3 when your `python3` links an OpenSSL
+  that has it; Apple's stock `python3` links LibreSSL 2.8.3 and negotiates
+  1.2. Either way the relay only offers forward-secret AEAD ciphers, and it
+  prints which library and protocol it got when it starts.
+- **One door.** `opencode web` is started with `--hostname 127.0.0.1`, so the
+  plain-HTTP backend isn't reachable from the network at all; the relay is
+  the only LAN-facing listener. Check it yourself with
+  `lsof -nP -iTCP -sTCP:LISTEN`.
+- **A password worth having.** The installer generates one with 100 bits of
+  entropy rather than letting you pick `hunter2`.
+- **A cost per guess.** opencode itself has no rate limiting or lockout, so
+  the relay adds some: a rejected login closes the connection, making every
+  guess pay for a new TLS handshake, and twenty rejections from one address
+  in ten minutes blocks it for fifteen.
+- **A ceiling.** 64 connections at once, 16 from one address, 30 new per
+  minute per address, a ten second handshake limit and a fifteen minute idle
+  timeout. Connections over the limit are dropped before any TLS work.
+- **A record.** Connections, refusals and lockouts are logged to the terminal
+  with the address. Your traffic never is.
+
+**Not in scope.** A Mac or iPad that is already compromised. Anyone who knows
+your password or has a copy of `key.pem` — both give full access, by design.
+Attackers from the internet: nothing here is port-forwarded and the relay
+listens on IPv4 only, but that is your router's doing as much as ours.
+Physical access to an unlocked Mac.
 
 ## Honest limits
 
@@ -148,16 +172,38 @@ Mac).
   starts warning a month ahead.
 - **Not device allow-listing.** Any device on the LAN with both your cert and
   your password could connect. In practice, only your iPad has both.
-- **No brute-force protection yet.** Nothing on the path rate-limits logins,
-  so someone on your LAN could hammer them. The generated password is long
-  enough that this doesn't get them anywhere; if you set your own, make it
-  a real one.
+- **Anyone can claim the name.** mDNS has no authentication, so another
+  machine on the network can answer to `opencode.local`. TLS is what protects
+  you: their certificate won't be the one your iPad trusts. **Never tap
+  through a certificate warning, and never use `http://` from the iPad** —
+  those are the two ways to hand your password to whoever is impersonating
+  the Mac.
+- **Rate limiting is per address.** Someone with several addresses can work
+  around the lockout. The overall connection cap still applies, and the
+  password is the real defence.
+- **The backend is open on the Mac itself.** Any program running as you can
+  reach `127.0.0.1:4096` and is subject only to opencode's own password
+  check.
+- **Lid closed still sleeps.** `caffeinate -i` prevents idle sleep, not
+  sleep from closing the lid.
+- **It works with Safari's HTTPS-Only Mode** — reported, not something the
+  test suite can check. This is real HTTPS with a certificate your iPad
+  trusts, so nothing has to be relaxed to make it work.
 
 ## Troubleshooting
 
-Most issues are one of: the iPad cert profile isn't installed/trusted, the iPad
-and Mac aren't on the same network, or a stale relay process is squatting on
-port 443 (`pkill -f opencode-web-proxy.py`).
+Most issues are one of: the iPad cert profile isn't installed or trusted, the
+iPad and Mac aren't on the same network, or a stale relay is still holding
+port 443. For the last one, the launcher records what it started in
+`~/.local/share/opencode-web/run.pid`, so `kill $(cat
+~/.local/share/opencode-web/run.pid)` clears it.
+
+If the iPad can't find `opencode.local`, the launcher prints your Mac's own
+Bonjour name at start-up and the certificate covers that too, so try it
+instead.
+
+Locked yourself out after too many wrong passwords? It clears after fifteen
+minutes, or immediately if you restart the launcher.
 
 ## Upgrading
 
