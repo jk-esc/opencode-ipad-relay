@@ -10,11 +10,12 @@ which the opencode web UI requires.
 from __future__ import annotations
 
 import os
+import select
 import socket
 import socketserver
 import ssl
 import sys
-import threading
+import time
 
 CERT_DIR = os.path.expanduser("~/.local/share/opencode-web")
 CERT = os.path.join(CERT_DIR, "cert.pem")
@@ -26,6 +27,13 @@ BUFSIZE = 64 * 1024
 # Long enough for a slow phone on bad Wi-Fi, short enough that a peer
 # holding a socket open without speaking TLS is not free.
 HANDSHAKE_TIMEOUT = 10.0
+# A live page holds an event stream open, so this only has to be longer than
+# the gap between reconnects. The browser reopens the stream by itself.
+IDLE_TIMEOUT = 900.0
+# Most we will hold for one direction before we stop reading the other.
+MAX_BUFFER = 1024 * 1024
+# How often an otherwise quiet connection re-checks its idle deadline.
+POLL_INTERVAL = 1.0
 
 
 class RelayHandler(socketserver.BaseRequestHandler):
@@ -76,33 +84,120 @@ class RelayHandler(socketserver.BaseRequestHandler):
             backend = socket.create_connection((BACKEND_HOST, BACKEND_PORT), timeout=10)
         except OSError:
             return
-        client.settimeout(None)
-        backend.settimeout(None)
-
-        def pump(src: socket.socket, dst: socket.socket) -> None:
+        try:
+            self._pump(client, backend)
+        finally:
             try:
-                while True:
-                    data = src.recv(BUFSIZE)
-                    if not data:
-                        try:
-                            dst.shutdown(socket.SHUT_WR)
-                        except OSError:
-                            pass
-                        break
-                    dst.sendall(data)
+                backend.close()
             except OSError:
                 pass
 
-        t1 = threading.Thread(target=pump, args=(client, backend), daemon=True)
-        t2 = threading.Thread(target=pump, args=(backend, client), daemon=True)
-        t1.start()
-        t2.start()
-        t1.join()
-        t2.join()
-        try:
-            backend.close()
-        except OSError:
-            pass
+    def _pump(self, client: ssl.SSLSocket, backend: socket.socket) -> None:
+        """Shuttle bytes between the TLS client and the backend.
+
+        One thread, both directions, because an SSLSocket is not safe to read
+        on one thread while writing it on another: a read can drive a write
+        internally (a TLS 1.3 key update, say) and the two corrupt each
+        other's state.
+
+        The TLS side is never half-closed. SSLSocket.shutdown() discards the
+        TLS state, after which reads return raw ciphertext -- which used to
+        get forwarded to the backend as if it were a request.
+        """
+        idle_timeout = self.server.idle_timeout
+        client.setblocking(False)
+        backend.setblocking(False)
+
+        to_backend = bytearray()
+        to_client = bytearray()
+        client_done = False  # client will send nothing more
+        backend_done = False
+        backend_write_closed = False
+        deadline = time.monotonic() + idle_timeout
+
+        while True:
+            if time.monotonic() > deadline:
+                return
+
+            # Stop reading a side whose outbound buffer is already full, so a
+            # fast peer cannot make us hold unbounded data for a slow one.
+            readers: list[socket.socket] = []
+            if not client_done and len(to_backend) < MAX_BUFFER:
+                readers.append(client)
+            if not backend_done and len(to_client) < MAX_BUFFER:
+                readers.append(backend)
+            writers: list[socket.socket] = []
+            if to_backend:
+                writers.append(backend)
+            if to_client:
+                writers.append(client)
+
+            if not readers and not writers:
+                return
+
+            # Decrypted bytes can already be buffered inside the SSL object,
+            # where select() cannot see them.
+            ready_now = client in readers and client.pending()
+            try:
+                readable, writable, _ = select.select(
+                    readers, writers, [], 0 if ready_now else POLL_INTERVAL
+                )
+            except OSError:
+                return
+            if ready_now and client not in readable:
+                readable = [*readable, client]
+
+            progressed = False
+
+            for sock in readable:
+                try:
+                    data = sock.recv(BUFSIZE)
+                except (ssl.SSLWantReadError, ssl.SSLWantWriteError, BlockingIOError):
+                    continue
+                except OSError:
+                    return
+                if data:
+                    progressed = True
+                    if sock is client:
+                        to_backend += data
+                    else:
+                        to_client += data
+                elif sock is client:
+                    client_done = True
+                else:
+                    backend_done = True
+
+            for sock in writable:
+                buf = to_backend if sock is backend else to_client
+                if not buf:
+                    continue
+                try:
+                    sent = sock.send(buf)
+                except (ssl.SSLWantReadError, ssl.SSLWantWriteError, BlockingIOError):
+                    continue
+                except OSError:
+                    return
+                if sent:
+                    progressed = True
+                    del buf[:sent]
+
+            if progressed:
+                deadline = time.monotonic() + idle_timeout
+
+            # The client is finished and everything it said has been passed
+            # on: tell the backend, so it stops waiting for more. This side is
+            # plain TCP, so half-closing it is safe.
+            if client_done and not to_backend and not backend_write_closed:
+                backend_write_closed = True
+                try:
+                    backend.shutdown(socket.SHUT_WR)
+                except OSError:
+                    return
+
+            # Once the backend is done and the client has everything, we are
+            # done. Closing outright is the only clean end for the TLS side.
+            if backend_done and not to_client:
+                return
 
 
 class ThreadingTLSServer(socketserver.ThreadingTCPServer):
@@ -113,6 +208,7 @@ class ThreadingTLSServer(socketserver.ThreadingTCPServer):
 
     context: ssl.SSLContext
     handshake_timeout: float
+    idle_timeout: float
 
 
 def build_context(certfile: str, keyfile: str) -> ssl.SSLContext:
@@ -132,6 +228,7 @@ def create_server(
     listen_port: int = 443,
     *,
     handshake_timeout: float = HANDSHAKE_TIMEOUT,
+    idle_timeout: float = IDLE_TIMEOUT,
 ) -> ThreadingTLSServer:
     """Build a TLS-wrapped relay server (without serving).
 
@@ -143,6 +240,7 @@ def create_server(
     server = ThreadingTLSServer((listen_host, listen_port), RelayHandler)
     server.context = build_context(certfile, keyfile)
     server.handshake_timeout = handshake_timeout
+    server.idle_timeout = idle_timeout
     return server
 
 
