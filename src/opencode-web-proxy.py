@@ -14,8 +14,8 @@ import dataclasses
 import os
 import select
 import socket
-import socketserver
 import logging
+import socketserver
 import ssl
 import sys
 import threading
@@ -24,9 +24,29 @@ import time
 CERT_DIR = os.path.expanduser("~/.local/share/opencode-web")
 CERT = os.path.join(CERT_DIR, "cert.pem")
 KEY = os.path.join(CERT_DIR, "key.pem")
-LISTEN_PORT = int(os.environ.get("OPENCODE_WEB_PROXY_PORT", "443"))
+
+
+def port_from_env(name: str, raw: str | None, default: int) -> int:
+    """Read a port override, and explain it rather than throw a traceback."""
+    if raw is None or raw == "":
+        return default
+    try:
+        port = int(raw)
+    except ValueError:
+        sys.exit(f"{name} must be a port number, got {raw!r}")
+    if not 1 <= port <= 65535:
+        sys.exit(f"{name} must be between 1 and 65535, got {raw!r}")
+    return port
+
+
+# Overrides exist so the relay can be run somewhere harmless while testing.
+LISTEN_PORT = port_from_env(
+    "OPENCODE_WEB_PROXY_PORT", os.environ.get("OPENCODE_WEB_PROXY_PORT"), 443
+)
 BACKEND_HOST = os.environ.get("OPENCODE_WEB_BACKEND_HOST", "127.0.0.1")
-BACKEND_PORT = int(os.environ.get("OPENCODE_WEB_BACKEND_PORT", "4096"))
+BACKEND_PORT = port_from_env(
+    "OPENCODE_WEB_BACKEND_PORT", os.environ.get("OPENCODE_WEB_BACKEND_PORT"), 4096
+)
 BUFSIZE = 64 * 1024
 # Long enough for a slow phone on bad Wi-Fi, short enough that a peer
 # holding a socket open without speaking TLS is not free.
@@ -378,9 +398,9 @@ def build_context(certfile: str, keyfile: str) -> ssl.SSLContext:
 def create_server(
     certfile: str,
     keyfile: str,
-    # nosec B104 - 0.0.0.0 is required: the relay is the LAN-facing TLS front
-    # end by design (the opencode backend stays on 127.0.0.1).
-    listen_host: str = "0.0.0.0",
+    # Listening on every interface is the whole point: this is the LAN-facing
+    # front door, and it is what keeps the backend on 127.0.0.1.
+    listen_host: str = "0.0.0.0",  # nosec B104
     listen_port: int = 443,
     *,
     handshake_timeout: float = HANDSHAKE_TIMEOUT,
