@@ -75,7 +75,7 @@ seed_cert() {
     # Same shape as the one the installer makes, so a seeded install looks
     # like an up-to-date one; only the key size and lifetime differ.
     openssl req -x509 -newkey rsa:2048 -nodes \
-      -keyout "$cache/key.pem" -out "$cache/cert.pem" -days 30 \
+      -keyout "$cache/key.pem" -out "$cache/cert.pem" -days 400 \
       -subj "/CN=opencode.local" \
       -addext "subjectAltName=DNS:opencode.local,DNS:$(scutil --get LocalHostName).local" \
       -addext "extendedKeyUsage=serverAuth" \
@@ -567,20 +567,38 @@ assert_dead() {
 }
 
 @test "launcher refuses to start with an expired certificate" {
+  seed_cert
   run run_install
   [ "$status" -eq 0 ]
   stub_launcher_deps
   stub_mdns_deps
-  # -days 1 with a start date in the past leaves it already expired.
-  faketime_cert="$(mktemp -d)"
-  openssl req -x509 -newkey rsa:2048 -nodes \
-    -keyout "$KEY_FILE" -out "$faketime_cert/c.pem" -days 1 \
-    -not_before 20200101000000Z -not_after 20200102000000Z \
-    -subj "/CN=opencode.local" \
-    -addext "subjectAltName=DNS:opencode.local" >/dev/null 2>&1
-  cp "$faketime_cert/c.pem" "$CERT_FILE"
-  rm -rf "$faketime_cert"
+  # Backdating a certificate needs -not_before, which OpenSSL only grew in
+  # 3.2 and the openssl Apple ships doesn't have. So stand in for openssl
+  # and answer -checkend the way it would for something long expired. The
+  # stub looks at the real argument, so it still catches the launcher
+  # asking the wrong question.
+  cat >"$STUB_BIN/openssl" <<'EOF2'
+#!/bin/bash
+for arg in "$@"; do
+  if [ "$arg" = "-checkend" ]; then exit 1; fi
+done
+exec /usr/bin/openssl "$@"
+EOF2
+  chmod +x "$STUB_BIN/openssl"
   run "$BIN_DIR/opencode-web"
   [ "$status" -ne 0 ]
   assert_contains "$output" "expired"
+}
+
+@test "launcher starts normally when the certificate is fine" {
+  # Guards the two checks above: neither may fire on a healthy certificate.
+  seed_cert
+  run run_install
+  [ "$status" -eq 0 ]
+  stub_launcher_deps
+  stub_mdns_deps
+  run "$BIN_DIR/opencode-web"
+  [ "$status" -eq 0 ]
+  assert_not_contains "$output" "expired"
+  assert_not_contains "$output" "will expire"
 }
