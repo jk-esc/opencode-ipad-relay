@@ -211,10 +211,13 @@ exec >/dev/null 2>&1
 exec sleep 60
 EOF2
   # The fake backend counts as listening only once it has really started,
-  # so the launcher's readiness loop can't race ahead of it.
+  # so the launcher's readiness loop can't race ahead of it. The first call
+  # always says "not yet", which forces one turn of the loop and gives
+  # anything else the launcher backgrounded a chance to run.
   cat >"$STUB_BIN/lsof" <<'EOF2'
 #!/bin/bash
-[ -f "$HOME/opencode.args" ]
+[ -f "$HOME/opencode.args" ] || exit 1
+[ -f "$HOME/lsof.polled" ] || { : >"$HOME/lsof.polled"; exit 1; }
 EOF2
   cat >"$STUB_BIN/caffeinate" <<'EOF2'
 #!/bin/bash
