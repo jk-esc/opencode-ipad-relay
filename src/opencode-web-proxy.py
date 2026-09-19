@@ -15,6 +15,7 @@ import os
 import select
 import socket
 import socketserver
+import logging
 import ssl
 import sys
 import threading
@@ -38,6 +39,13 @@ MAX_BUFFER = 1024 * 1024
 # How often an otherwise quiet connection re-checks its idle deadline.
 POLL_INTERVAL = 1.0
 RATE_WINDOW = 60.0
+# Status lines that mean "wrong password". Matched on the first bytes of a
+# response, which is not HTTP parsing: we never look inside, buffer, or
+# reorder anything, and a response we mis-read only costs that connection.
+REJECTED = (b"HTTP/1.1 401", b"HTTP/1.0 401")
+
+
+LOG = logging.getLogger("opencode-web-proxy")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -51,6 +59,11 @@ class Limits:
     max_connections: int = 64
     max_per_ip: int = 16
     new_per_minute: int = 30
+    # Rejected logins tolerated from one address before it is shut out.
+    # A page load can legitimately produce a few, so this is not tight.
+    auth_failures: int = 20
+    auth_window: float = 600.0
+    lockout_seconds: float = 900.0
 
 
 class RelayHandler(socketserver.BaseRequestHandler):
@@ -130,6 +143,7 @@ class RelayHandler(socketserver.BaseRequestHandler):
         client_done = False  # client will send nothing more
         backend_done = False
         backend_write_closed = False
+        drop_after_flush = False
         deadline = time.monotonic() + idle_timeout
 
         while True:
@@ -179,6 +193,16 @@ class RelayHandler(socketserver.BaseRequestHandler):
                         to_backend += data
                     else:
                         to_client += data
+                        if data.startswith(REJECTED):
+                            # Pass the challenge on so the browser can ask
+                            # again, then hang up: every guess should cost a
+                            # whole new TLS handshake.
+                            drop_after_flush = True
+                            if self.server.note_rejected_login(self.client_address):
+                                LOG.warning(
+                                    "locking out %s after repeated bad logins",
+                                    self.server.peer_ip(self.client_address),
+                                )
                 elif sock is client:
                     client_done = True
                 else:
@@ -211,6 +235,9 @@ class RelayHandler(socketserver.BaseRequestHandler):
                 except OSError:
                     return
 
+            if drop_after_flush and not to_client:
+                return
+
             # Once the backend is done and the client has everything, we are
             # done. Closing outright is the only clean end for the TLS side.
             if backend_done and not to_client:
@@ -234,9 +261,26 @@ class ThreadingTLSServer(socketserver.ThreadingTCPServer):
         self._live_total = 0
         self._live_by_ip: collections.Counter[str] = collections.Counter()
         self._recent: dict[str, collections.deque[float]] = {}
+        self._failures: dict[str, collections.deque[float]] = {}
+        self._locked_until: dict[str, float] = {}
+
+    def note_rejected_login(self, client_address: tuple[str, int] | str) -> bool:
+        """Count one wrong password. True if that address is now shut out."""
+        ip = self.peer_ip(client_address)
+        now = time.monotonic()
+        with self._lock:
+            failures = self._failures.setdefault(ip, collections.deque())
+            while failures and now - failures[0] > self.limits.auth_window:
+                failures.popleft()
+            failures.append(now)
+            if len(failures) < self.limits.auth_failures:
+                return False
+            self._locked_until[ip] = now + self.limits.lockout_seconds
+            failures.clear()
+            return True
 
     @staticmethod
-    def _peer_ip(client_address: tuple[str, int] | str) -> str:
+    def peer_ip(client_address: tuple[str, int] | str) -> str:
         return (
             client_address[0] if isinstance(client_address, tuple) else client_address
         )
@@ -252,9 +296,14 @@ class ThreadingTLSServer(socketserver.ThreadingTCPServer):
         and nothing else -- no handshake, no key exchange, no thread. The
         peer sees the connection drop.
         """
-        ip = self._peer_ip(client_address)
+        ip = self.peer_ip(client_address)
         now = time.monotonic()
         with self._lock:
+            locked_until = self._locked_until.get(ip)
+            if locked_until is not None:
+                if now < locked_until:
+                    return False
+                del self._locked_until[ip]
             recent = self._recent.setdefault(ip, collections.deque())
             while recent and now - recent[0] > RATE_WINDOW:
                 recent.popleft()
@@ -277,7 +326,7 @@ class ThreadingTLSServer(socketserver.ThreadingTCPServer):
         try:
             super().process_request_thread(request, client_address)
         finally:
-            ip = self._peer_ip(client_address)
+            ip = self.peer_ip(client_address)
             with self._lock:
                 self._live_total -= 1
                 self._live_by_ip[ip] -= 1
