@@ -93,7 +93,9 @@ cd opencode-ipad-relay
 The installer will:
 
 1. Verify the prerequisites.
-2. Prompt you to choose a password (stored only on your Mac, mode `600`).
+2. Make up a password and show it to you once (stored only on your Mac,
+   mode `600`). Run `./install.sh --password` if you'd rather choose your
+   own; it asks for at least 12 characters.
 3. Generate a 10-year self-signed certificate for `opencode.local` (with your
    current LAN IP as a SAN backup).
 4. Install `opencode-web` and `opencode-web-proxy.py` into `~/.local/bin`.
@@ -110,7 +112,9 @@ opencode-web
 ```
 
 On the iPad (same network): `https://opencode.local` — log in with username
-`opencode` and the password you chose.
+`opencode` and the password the installer gave you. It's lowercase letters
+and digits in dash-separated groups, with no characters that look alike, so
+it's bearable to type on a touch keyboard. Safari will offer to remember it.
 
 The Mac's IP can change between networks; the launcher looks it up at every
 start and advertises `opencode.local` for it. `caffeinate -i` in the launcher
@@ -141,8 +145,10 @@ Mac).
   installing it on your own device. Encryption strength is unaffected.
 - **Not device allow-listing.** Any device on the LAN with both your cert and
   your password could connect. In practice, only your iPad has both.
-- **No brute-force protection.** A determined attacker on your LAN could hammer
-  the login. Choose a strong password.
+- **No brute-force protection yet.** Nothing on the path rate-limits logins,
+  so someone on your LAN could hammer them. The generated password is long
+  enough that this doesn't get them anywhere; if you set your own, make it
+  a real one.
 
 ## Troubleshooting
 
