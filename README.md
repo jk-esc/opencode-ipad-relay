@@ -18,8 +18,8 @@ has no native TLS option. That has two nasty consequences on a shared network
   over plain HTTP the credentials travel as cleartext base64. Anyone capturing
   traffic on the same LAN can read them.
 - **mDNS is convenient but unencrypted.** Running `opencode web --mdns` gives
-  you a nice stable name (`opencode.local`), but the traffic itself is still
-  exposed.
+  you a nice stable name (`opencode.local`), but it also makes opencode listen
+  on every interface (`0.0.0.0`), so the plain-HTTP server itself is exposed.
 
 The usual workarounds each have an unacceptable cost for this use case:
 
@@ -31,9 +31,10 @@ The usual workarounds each have an unacceptable cost for this use case:
 | Commercial reverse proxy (nginx, Caddy) | Yet another thing to install                                 |
 
 This project closes the gap with **nothing but what macOS already ships**: a
-tiny stdlib-only Python TLS relay in front of `opencode web`, a self-signed
-certificate you trust once on the iPad, and mDNS for discovery. The result is
-real HTTPS, LAN-only, password-protected, no installs.
+tiny stdlib-only Python TLS relay in front of `opencode web` (which is kept
+on `127.0.0.1`), a self-signed certificate you trust once on the iPad, and
+mDNS for discovery (advertised by the launcher with the stock `dns-sd` tool).
+The result is real HTTPS, LAN-only, password-protected, no installs.
 
 ## Screenshots
 
@@ -52,9 +53,14 @@ real HTTPS, LAN-only, password-protected, no installs.
 │  cert once) │   opencode.local │ (self-signed cert)    │   1:4096 │ (bound to localhost)│
 └─────────────┘                  └──────────────────────┘          └─────────────────────┘
         ▲                                ▲                                   ▲
-        │  only reachable on the         │  single LAN-facing listener       │  not exposed to the
-        │  same network (mDNS)           │  (terminates TLS)                  │  network at all
+        │  only reachable on the         │  single LAN-facing listener       │  started with
+        │  same network (mDNS)           │  (terminates TLS)                  │  --hostname 127.0.0.1
 ```
+
+The launcher advertises `opencode.local` itself (`dns-sd -P`, part of macOS)
+because opencode only publishes mDNS for LAN-facing listeners, and we never
+want one. Your Mac's own Bonjour name (`<name>.local`, printed at start-up)
+works as a fallback.
 
 The relay is a **raw TCP byte-pump**, not an HTTP proxy: the opencode web UI
 depends on long-lived streams (Server-Sent Events on `/event`, WebSocket-style
@@ -68,7 +74,8 @@ TLS, so the iPad<->Mac hop is fully encrypted.
 - **Any Mac** — MacBook, iMac, Mac mini, Mac Studio — running a recent macOS.
   CI tests on macOS 15, both Intel and Apple Silicon.
 - [`opencode`](https://opencode.ai) installed on that Mac (e.g. `brew install
-opencode`). The relay itself adds nothing beyond what macOS ships.
+opencode`); tested with 1.18.29, which has the `--hostname` flag the launcher
+relies on. The relay itself adds nothing beyond what macOS ships.
 - `python3` and `openssl` — stock on macOS. On a brand-new Mac, running
   `python3` for the first time may show an Apple dialog offering to install
   the Command Line Tools; accept it once and you're set.
@@ -105,17 +112,21 @@ opencode-web
 On the iPad (same network): `https://opencode.local` — log in with username
 `opencode` and the password you chose.
 
-The Mac's IP can change between networks; mDNS keeps `opencode.local` pointing
-at it. `caffeinate -i` in the launcher keeps the Mac awake (AC or battery)
-while the server runs.
+The Mac's IP can change between networks; the launcher looks it up at every
+start and advertises `opencode.local` for it. `caffeinate -i` in the launcher
+prevents idle sleep while the server runs (closing the lid still sleeps the
+Mac).
 
 ## Security highlights
 
-- ✅ **Real TLS 1.3** between iPad and Mac — nothing is sniffable on shared Wi-Fi
+- ✅ **TLS 1.2 or 1.3** between iPad and Mac — nothing is sniffable on shared
+  Wi-Fi. (1.3 when your `python3` links a TLS 1.3-capable OpenSSL; Apple's
+  stock `python3` negotiates 1.2.)
 - ✅ **Password travels inside TLS**, never as cleartext on the wire
 - ✅ **LAN-only** — nothing is exposed to the internet, nothing to port-forward
-- ✅ **Backend never touches the network** — `opencode web` stays bound to
-  `127.0.0.1`; the relay is the only LAN-facing listener
+- ✅ **Backend never touches the network** — the launcher starts `opencode web`
+  with `--hostname 127.0.0.1`; the relay is the only LAN-facing listener.
+  Check for yourself: `lsof -nP -iTCP -sTCP:LISTEN`
 - ✅ **Works with Safari's HTTPS-Only Mode fully enabled.** Because this is
   genuine HTTPS with a certificate your iPad trusts, you never need to weaken
   your browser's defenses — no "allow insecure content", no exceptions, no
@@ -138,6 +149,16 @@ while the server runs.
 Most issues are one of: the iPad cert profile isn't installed/trusted, the iPad
 and Mac aren't on the same network, or a stale relay process is squatting on
 port 443 (`pkill -f opencode-web-proxy.py`).
+
+## Upgrading
+
+```bash
+git pull
+./install.sh
+```
+
+The installer copies the new launcher and relay into `~/.local/bin`; your
+password and certificate are kept.
 
 ## Uninstall
 
