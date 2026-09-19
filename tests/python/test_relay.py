@@ -324,3 +324,81 @@ def test_silent_client_is_dropped_after_the_handshake_timeout(
         stalled.close()
         server.shutdown()
         server.server_close()
+
+
+def test_backend_half_close_does_not_leak_ciphertext(
+    cert: tuple[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whatever reaches the backend must be plaintext, never TLS records.
+
+    Calling shutdown() on an SSLSocket throws away its TLS state, so the
+    relay's next read on that socket returned raw encrypted bytes, which it
+    then forwarded to the backend as if they were a request.
+    """
+    certfile, keyfile = cert
+    seen: list[bytes] = []
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+
+    def serve() -> None:
+        conn, _ = listener.accept()
+        seen.append(conn.recv(4096))
+        conn.shutdown(socket.SHUT_WR)  # done replying, still reading
+        conn.settimeout(3)
+        try:
+            while True:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                seen.append(chunk)
+        except OSError:
+            pass
+        conn.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    monkeypatch.setattr(relay, "BACKEND_HOST", "127.0.0.1")
+    monkeypatch.setattr(relay, "BACKEND_PORT", listener.getsockname()[1])
+    server = relay.create_server(certfile, keyfile, "127.0.0.1", 0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        sock = _tls_connect(server.server_address[1])
+        sock.sendall(b"FIRST")
+        time.sleep(0.5)
+        for _ in range(3):
+            try:
+                sock.sendall(b"AFTER")
+            except OSError:
+                break
+            time.sleep(0.2)
+        time.sleep(0.5)
+        sock.close()
+    finally:
+        listener.close()
+        server.shutdown()
+        server.server_close()
+
+    for chunk in seen:
+        assert not chunk.startswith(b"\x17\x03"), f"TLS record reached backend: {chunk!r}"
+        assert chunk in (b"FIRST", b"AFTER"), f"unexpected bytes at backend: {chunk!r}"
+
+
+def test_idle_connection_is_closed(
+    cert: tuple[str, str], backend: tuple[str, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A connection that goes quiet is eventually reclaimed."""
+    certfile, keyfile = cert
+    host, port = backend
+    monkeypatch.setattr(relay, "BACKEND_HOST", host)
+    monkeypatch.setattr(relay, "BACKEND_PORT", port)
+    server = relay.create_server(certfile, keyfile, "127.0.0.1", 0, idle_timeout=1)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        sock = _tls_connect(server.server_address[1])
+        sock.settimeout(6)
+        assert sock.recv(1) == b"", "idle connection should have been closed"
+    finally:
+        sock.close()
+        server.shutdown()
+        server.server_close()
