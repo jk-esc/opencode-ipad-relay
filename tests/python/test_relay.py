@@ -492,3 +492,158 @@ def test_a_freed_slot_can_be_reused(limited) -> None:
         except OSError:
             time.sleep(0.05)
     pytest.fail("slot was never released")
+
+
+# --------------------------------------------------------------------------- #
+# Brute-force resistance
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture()
+def always_replies():
+    """A backend that answers every request with one fixed response."""
+    listeners: list[socket.socket] = []
+
+    def build(response: bytes, keep_open: bool = False) -> int:
+        listener = socket.socket()
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(16)
+        listeners.append(listener)
+
+        def serve() -> None:
+            while True:
+                try:
+                    conn, _ = listener.accept()
+                except OSError:
+                    return
+                def talk(conn: socket.socket = conn) -> None:
+                    try:
+                        while conn.recv(4096):
+                            conn.sendall(response)
+                            if not keep_open:
+                                break
+                    except OSError:
+                        pass
+                    conn.close()
+
+                threading.Thread(target=talk, daemon=True).start()
+
+        threading.Thread(target=serve, daemon=True).start()
+        return listener.getsockname()[1]
+
+    try:
+        yield build
+    finally:
+        for listener in listeners:
+            listener.close()
+
+
+UNAUTHORIZED = (
+    b"HTTP/1.1 401 Unauthorized\r\n"
+    b'WWW-Authenticate: Basic realm="Secure Area"\r\n'
+    b"Content-Length: 0\r\n\r\n"
+)
+OK = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+
+
+@pytest.fixture()
+def relay_to(monkeypatch: pytest.MonkeyPatch, cert: tuple[str, str]):
+    """Point a relay at an arbitrary backend port, with chosen limits."""
+    certfile, keyfile = cert
+    servers: list[relay.ThreadingTLSServer] = []
+
+    def build(backend_port: int, **kwargs: float) -> int:
+        monkeypatch.setattr(relay, "BACKEND_HOST", "127.0.0.1")
+        monkeypatch.setattr(relay, "BACKEND_PORT", backend_port)
+        server = relay.create_server(
+            certfile, keyfile, "127.0.0.1", 0, limits=relay.Limits(**kwargs)
+        )
+        servers.append(server)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server.server_address[1]
+
+    try:
+        yield build
+    finally:
+        for server in servers:
+            server.shutdown()
+            server.server_close()
+
+
+def _attempt(port: int) -> bytes:
+    """One login attempt through the relay; returns everything received."""
+    sock = _tls_connect(port, timeout=5)
+    sock.settimeout(5)
+    try:
+        sock.sendall(b"GET / HTTP/1.1\r\nHost: opencode.local\r\n\r\n")
+        chunks = []
+        while True:
+            data = sock.recv(4096)
+            if not data:
+                break
+            chunks.append(data)
+        return b"".join(chunks)
+    finally:
+        sock.close()
+
+
+def test_a_rejected_login_ends_the_connection(always_replies, relay_to) -> None:
+    """Every guess should cost a fresh TLS handshake.
+
+    The backend here keeps the connection open, so if the relay did nothing
+    an attacker could keep guessing down the same socket for free.
+    """
+    port = relay_to(always_replies(UNAUTHORIZED, keep_open=True))
+    received = _attempt(port)  # reads until the far end closes
+    assert b"401 Unauthorized" in received, received
+    assert b"WWW-Authenticate" in received, "the browser still needs the challenge"
+
+
+def test_a_good_response_does_not_end_a_keepalive_connection(
+    always_replies, relay_to
+) -> None:
+    """Closing must be specific to rejected logins, not to every response."""
+    port = relay_to(always_replies(OK, keep_open=True))
+    sock = _tls_connect(port, timeout=5)
+    sock.settimeout(5)
+    try:
+        for _ in range(2):
+            sock.sendall(b"GET / HTTP/1.1\r\nHost: opencode.local\r\n\r\n")
+            assert b"200 OK" in sock.recv(4096)
+    finally:
+        sock.close()
+
+
+def test_repeated_rejections_lock_the_address_out(always_replies, relay_to) -> None:
+    port = relay_to(
+        always_replies(UNAUTHORIZED),
+        auth_failures=3,
+        lockout_seconds=2,
+        new_per_minute=99,
+    )
+    for _ in range(3):
+        _attempt(port)
+    _expect_refused(port)
+
+
+def test_a_lockout_expires(always_replies, relay_to) -> None:
+    port = relay_to(
+        always_replies(UNAUTHORIZED),
+        auth_failures=2,
+        lockout_seconds=1,
+        new_per_minute=99,
+    )
+    for _ in range(2):
+        _attempt(port)
+    _expect_refused(port)
+    time.sleep(1.5)
+    assert b"401" in _attempt(port), "should be allowed to try again"
+
+
+def test_successful_requests_never_lock_anyone_out(always_replies, relay_to) -> None:
+    """The thing that would make this feature unusable is locking out someone
+    who typed the right password."""
+    port = relay_to(always_replies(OK), auth_failures=2, new_per_minute=99)
+    for _ in range(6):
+        assert b"200 OK" in _attempt(port)
