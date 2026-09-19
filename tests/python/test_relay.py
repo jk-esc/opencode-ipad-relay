@@ -12,6 +12,7 @@ import http.server
 import socket
 import ssl
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -25,6 +26,9 @@ _RELAY_PATH = Path(__file__).resolve().parents[2] / "src" / "opencode-web-proxy.
 _spec = importlib.util.spec_from_file_location("opencode_web_relay", _RELAY_PATH)
 assert _spec and _spec.loader
 relay = importlib.util.module_from_spec(_spec)
+# Register before executing: dataclasses looks the module up by name while
+# building the class, and blows up if it isn't there yet.
+sys.modules[_spec.name] = relay
 _spec.loader.exec_module(relay)
 
 
@@ -130,11 +134,13 @@ def relay_server(
         server.server_close()
 
 
-def _tls_connect(port: int, server_hostname: str = "opencode.local") -> ssl.SSLSocket:
+def _tls_connect(
+    port: int, server_hostname: str = "opencode.local", timeout: float = 10
+) -> ssl.SSLSocket:
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
-    raw = socket.create_connection(("127.0.0.1", port), timeout=10)
+    raw = socket.create_connection(("127.0.0.1", port), timeout=timeout)
     return ctx.wrap_socket(raw, server_hostname=server_hostname)
 
 
@@ -380,7 +386,9 @@ def test_backend_half_close_does_not_leak_ciphertext(
         server.server_close()
 
     for chunk in seen:
-        assert not chunk.startswith(b"\x17\x03"), f"TLS record reached backend: {chunk!r}"
+        assert not chunk.startswith(b"\x17\x03"), (
+            f"TLS record reached backend: {chunk!r}"
+        )
         assert chunk in (b"FIRST", b"AFTER"), f"unexpected bytes at backend: {chunk!r}"
 
 
@@ -402,3 +410,85 @@ def test_idle_connection_is_closed(
         sock.close()
         server.shutdown()
         server.server_close()
+
+
+# --------------------------------------------------------------------------- #
+# Connection limits
+# --------------------------------------------------------------------------- #
+
+
+def _expect_refused(port: int) -> None:
+    """A connection the relay turned away, before any TLS was spoken."""
+    with pytest.raises(OSError):
+        sock = _tls_connect(port, timeout=5)
+        sock.close()
+
+
+@pytest.fixture()
+def limited(
+    cert: tuple[str, str], backend: tuple[str, int], monkeypatch: pytest.MonkeyPatch
+):
+    """Build a relay with whatever limits a test asks for."""
+    certfile, keyfile = cert
+    host, port = backend
+    monkeypatch.setattr(relay, "BACKEND_HOST", host)
+    monkeypatch.setattr(relay, "BACKEND_PORT", port)
+    servers: list[relay.ThreadingTLSServer] = []
+
+    def build(**kwargs: int) -> int:
+        server = relay.create_server(
+            certfile, keyfile, "127.0.0.1", 0, limits=relay.Limits(**kwargs)
+        )
+        servers.append(server)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server.server_address[1]
+
+    try:
+        yield build
+    finally:
+        for server in servers:
+            server.shutdown()
+            server.server_close()
+
+
+def test_total_connections_are_capped(limited) -> None:
+    port = limited(max_connections=2, max_per_ip=99, new_per_minute=99)
+    held = [_tls_connect(port), _tls_connect(port)]
+    try:
+        _expect_refused(port)
+    finally:
+        for sock in held:
+            sock.close()
+
+
+def test_connections_per_address_are_capped(limited) -> None:
+    port = limited(max_connections=99, max_per_ip=2, new_per_minute=99)
+    held = [_tls_connect(port), _tls_connect(port)]
+    try:
+        _expect_refused(port)
+    finally:
+        for sock in held:
+            sock.close()
+
+
+def test_new_connections_are_rate_limited(limited) -> None:
+    """Closing and reopening must not be a way around the cap."""
+    port = limited(max_connections=99, max_per_ip=99, new_per_minute=3)
+    for _ in range(3):
+        _tls_connect(port).close()
+    _expect_refused(port)
+
+
+def test_a_freed_slot_can_be_reused(limited) -> None:
+    """The cap counts live connections, not connections ever made."""
+    port = limited(max_connections=1, max_per_ip=99, new_per_minute=99)
+    first = _tls_connect(port)
+    _expect_refused(port)
+    first.close()
+    for _ in range(40):
+        try:
+            _tls_connect(port).close()
+            return
+        except OSError:
+            time.sleep(0.05)
+    pytest.fail("slot was never released")
