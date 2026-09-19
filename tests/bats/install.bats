@@ -334,3 +334,23 @@ assert_dead() {
   run "$BIN_DIR/opencode-web"
   [ "$status" -eq 7 ]
 }
+
+@test "uninstall stops the processes listed in run.pid" {
+  run run_install "secret-pw" "secret-pw"
+  [ "$status" -eq 0 ]
+  sleep 60 >/dev/null 2>&1 &
+  FAKE_PID=$!
+  echo "$FAKE_PID" >"$DATA_DIR/run.pid"
+  run bash -c "printf 'n\n' | HOME='$TEST_HOME' '$REPO_ROOT/uninstall.sh'"
+  [ "$status" -eq 0 ]
+  assert_dead "$FAKE_PID"
+  [ ! -f "$DATA_DIR/run.pid" ]
+}
+
+@test "uninstall does not kill by process-name pattern" {
+  # pkill -f matches any command line containing the pattern, which can hit
+  # an editor or pager that merely has the file open. The uninstaller must
+  # only ever kill PIDs it recorded itself.
+  run grep -cE '^[[:space:]]*[^#]*\bpkill\b' "$REPO_ROOT/uninstall.sh"
+  [ "$output" = "0" ]
+}
