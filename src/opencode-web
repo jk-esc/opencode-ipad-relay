@@ -1,8 +1,11 @@
 #!/bin/bash
 set -e
 
-PASSWORD_FILE="$HOME/.local/share/opencode-web/password"
+DATA_DIR="$HOME/.local/share/opencode-web"
+PASSWORD_FILE="$DATA_DIR/password"
 PORT="${OPENCODE_WEB_PORT:-4096}"
+PROXY_PORT="${OPENCODE_WEB_PROXY_PORT:-443}"
+MDNS_NAME="opencode.local"
 
 if [ ! -f "$PASSWORD_FILE" ]; then
   echo "error: $PASSWORD_FILE not found — run install.sh first" >&2
@@ -10,14 +13,42 @@ if [ ! -f "$PASSWORD_FILE" ]; then
 fi
 PASSWORD="$(cat "$PASSWORD_FILE")"
 
+# IPv4 of the interface that carries the default route (Wi-Fi or Ethernet,
+# whatever is active right now). Empty / non-zero when there is none.
+lan_ip() {
+  local iface
+  iface="$(route -n get default 2>/dev/null | awk '/interface:/ {print $2; exit}')"
+  [ -n "$iface" ] || return 1
+  ipconfig getifaddr "$iface" 2>/dev/null
+}
+
 echo "Starting opencode web (loopback-only backend, password-protected)..."
 
 # The backend must never be reachable from the LAN: only the TLS relay is.
 # Without --hostname, `opencode web --mdns` binds 0.0.0.0 (plain HTTP).
 OPENCODE_SERVER_PASSWORD="$PASSWORD" caffeinate -i opencode web --hostname 127.0.0.1 --port "$PORT" &
 OPENCODE_PID=$!
+MDNS_PID=""
 
-trap 'kill $OPENCODE_PID 2>/dev/null || true' EXIT INT TERM
+cleanup() {
+  kill "$OPENCODE_PID" 2>/dev/null || true
+  if [ -n "$MDNS_PID" ]; then
+    kill "$MDNS_PID" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT INT TERM
+
+# opencode only publishes mDNS for a LAN-facing listener, so the launcher
+# advertises opencode.local itself with the stock dns-sd(1) proxy mode
+# (an A record for the name, pointing at this Mac, for as long as it runs).
+LOCAL_NAME="$(scutil --get LocalHostName 2>/dev/null || hostname -s).local"
+if LAN_IP="$(lan_ip)" && [ -n "$LAN_IP" ] && command -v dns-sd >/dev/null 2>&1; then
+  dns-sd -P opencode _https._tcp local "$PROXY_PORT" "$MDNS_NAME" "$LAN_IP" >/dev/null 2>&1 &
+  MDNS_PID=$!
+else
+  echo "warning: could not determine this Mac's LAN IPv4 (or dns-sd is missing);" >&2
+  echo "         $MDNS_NAME will not be advertised. Use https://$LOCAL_NAME instead." >&2
+fi
 
 for _ in $(seq 1 20); do
   if lsof -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
@@ -26,9 +57,14 @@ for _ in $(seq 1 20); do
   sleep 0.5
 done
 
+URL_PORT=""
+if [ "$PROXY_PORT" != "443" ]; then
+  URL_PORT=":$PROXY_PORT"
+fi
 echo ""
 echo "  This Mac (backend):  http://localhost:$PORT"
-echo "  iPad (this network): https://opencode.local"
+echo "  iPad (this network): https://$MDNS_NAME$URL_PORT"
+echo "                       https://$LOCAL_NAME$URL_PORT  (fallback name)"
 echo ""
 
 python3 "$HOME/.local/bin/opencode-web-proxy.py"
