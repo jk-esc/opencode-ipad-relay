@@ -77,12 +77,16 @@ class RelayHandler(socketserver.BaseRequestHandler):
     server: ThreadingTLSServer
 
     def handle(self) -> None:
+        ip = self.server.peer_ip(self.client_address)
         client = self._accept_tls()
         if client is None:
+            LOG.info("no TLS handshake from %s", ip)
             return
+        LOG.info("connected %s (%s)", ip, client.version())
         try:
             self._relay(client)
         finally:
+            LOG.info("closed %s", ip)
             try:
                 client.close()
             except OSError:
@@ -307,16 +311,26 @@ class ThreadingTLSServer(socketserver.ThreadingTCPServer):
             locked_until = self._locked_until.get(ip)
             if locked_until is not None:
                 if now < locked_until:
+                    LOG.info(
+                        "refused %s: locked out for another %.0fs",
+                        ip,
+                        locked_until - now,
+                    )
                     return False
                 del self._locked_until[ip]
             recent = self._recent.setdefault(ip, collections.deque())
             while recent and now - recent[0] > RATE_WINDOW:
                 recent.popleft()
             if len(recent) >= self.limits.new_per_minute:
-                return False
-            if self._live_total >= self.limits.max_connections:
-                return False
-            if self._live_by_ip[ip] >= self.limits.max_per_ip:
+                refusal = "connecting too often"
+            elif self._live_total >= self.limits.max_connections:
+                refusal = "relay is full"
+            elif self._live_by_ip[ip] >= self.limits.max_per_ip:
+                refusal = "too many connections from this address"
+            else:
+                refusal = ""
+            if refusal:
+                LOG.info("refused %s: %s", ip, refusal)
                 return False
             recent.append(now)
             self._live_total += 1
