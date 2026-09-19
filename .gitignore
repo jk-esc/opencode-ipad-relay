@@ -28,3 +28,7 @@ coverage.xml
 dist/
 *.tar.gz
 SHA256SUMS.txt
+
+# Notes, plans and scratch files. Only the README ships.
+*.md
+!README.md
