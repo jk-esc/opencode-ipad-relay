@@ -39,6 +39,11 @@ MAX_BUFFER = 1024 * 1024
 # How often an otherwise quiet connection re-checks its idle deadline.
 POLL_INTERVAL = 1.0
 RATE_WINDOW = 60.0
+# Only forward-secret AEAD suites. Worth naming explicitly: Apple's stock
+# python3 links LibreSSL 2.8.3, whose defaults still include CBC and SHA-1
+# suites. Leaves six suites there and nine (with TLS 1.3) on OpenSSL 3.
+CIPHERS = "ECDHE+AESGCM:ECDHE+CHACHA20:!aNULL:!MD5:!SHA1"
+MIN_PYTHON = (3, 9)
 # Status lines that mean "wrong password". Matched on the first bytes of a
 # response, which is not HTTP parsing: we never look inside, buffer, or
 # reorder anything, and a response we mis-read only costs that connection.
@@ -334,10 +339,24 @@ class ThreadingTLSServer(socketserver.ThreadingTCPServer):
                     del self._live_by_ip[ip]
 
 
+def require_supported_python() -> None:
+    """Refuse to run somewhere the TLS settings below would not hold."""
+    if sys.version_info < MIN_PYTHON:
+        sys.exit(
+            f"python {MIN_PYTHON[0]}.{MIN_PYTHON[1]} or newer is required "
+            f"(this is {sys.version.split()[0]})"
+        )
+
+
 def build_context(certfile: str, keyfile: str) -> ssl.SSLContext:
     """Create a TLS server context with a modern protocol floor."""
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.set_ciphers(CIPHERS)
+    context.options |= ssl.OP_NO_COMPRESSION
+    context.options |= ssl.OP_CIPHER_SERVER_PREFERENCE
+    # Absent on LibreSSL, which is what Apple's python3 links.
+    context.options |= getattr(ssl, "OP_NO_RENEGOTIATION", 0)
     context.load_cert_chain(certfile=certfile, keyfile=keyfile)
     return context
 
@@ -370,15 +389,27 @@ def create_server(
 
 
 def main() -> None:
+    require_supported_python()
     if not (os.path.exists(CERT) and os.path.exists(KEY)):
         sys.exit(
             "cert/key not found; run install.sh first "
             "(expected in ~/.local/share/opencode-web/)"
         )
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
+    )
     # LAN-facing by design; see create_server().
     server = create_server(CERT, KEY, "0.0.0.0", LISTEN_PORT)  # nosec B104
-    print(
-        f"TLS proxy listening on 0.0.0.0:{LISTEN_PORT} -> {BACKEND_HOST}:{BACKEND_PORT}"
+    best = "TLS 1.3" if ssl.HAS_TLSv1_3 else "TLS 1.2"
+    LOG.info(
+        "listening on 0.0.0.0:%s -> %s:%s (%s, up to %s)",
+        LISTEN_PORT,
+        BACKEND_HOST,
+        BACKEND_PORT,
+        ssl.OPENSSL_VERSION,
+        best,
     )
     try:
         server.serve_forever()
