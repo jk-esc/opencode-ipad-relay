@@ -96,8 +96,9 @@ The installer will:
 2. Make up a password and show it to you once (stored only on your Mac,
    mode `600`). Run `./install.sh --password` if you'd rather choose your
    own; it asks for at least 12 characters.
-3. Generate a 10-year self-signed certificate for `opencode.local` (with your
-   current LAN IP as a SAN backup).
+3. Generate a self-signed certificate for `opencode.local` and your Mac's
+   own Bonjour name, valid for 825 days (Apple's limit for a certificate
+   iOS will trust).
 4. Install `opencode-web` and `opencode-web-proxy.py` into `~/.local/bin`.
 5. Print the one-time iPad trust steps.
 
@@ -142,7 +143,9 @@ Mac).
 - **Same network only.** mDNS does not resolve across networks; this setup is
   intentionally LAN-only and does not cover remote access.
 - **Self-signed trust.** The certificate isn't CA-issued; trust comes from you
-  installing it on your own device. Encryption strength is unaffected.
+  installing it on your own device. Encryption strength is unaffected. It
+  lasts 825 days, after which you regenerate and re-trust it; the launcher
+  starts warning a month ahead.
 - **Not device allow-listing.** Any device on the LAN with both your cert and
   your password could connect. In practice, only your iPad has both.
 - **No brute-force protection yet.** Nothing on the path rate-limits logins,
@@ -163,8 +166,12 @@ git pull
 ./install.sh
 ```
 
-The installer copies the new launcher and relay into `~/.local/bin`; your
-password and certificate are kept.
+The installer copies the new launcher and relay into `~/.local/bin`. Your
+password is always kept. If your certificate predates these changes the
+installer explains why it needs replacing and asks first; say yes and you
+will need to install and trust the new one on the iPad, the same way you
+did originally. Delete the old profile under **Settings → General → VPN &
+Device Management** first.
 
 ## Uninstall
 
