@@ -59,6 +59,8 @@ MAX_BUFFER = 1024 * 1024
 # How often an otherwise quiet connection re-checks its idle deadline.
 POLL_INTERVAL = 1.0
 RATE_WINDOW = 60.0
+# How often to sweep per-address history that has aged out.
+PRUNE_INTERVAL = 60.0
 # Only forward-secret AEAD suites. Worth naming explicitly: Apple's stock
 # python3 links LibreSSL 2.8.3, whose defaults still include CBC and SHA-1
 # suites. Leaves six suites there and nine (with TLS 1.3) on OpenSSL 3.
@@ -292,6 +294,33 @@ class ThreadingTLSServer(socketserver.ThreadingTCPServer):
         self._recent: dict[str, collections.deque[float]] = {}
         self._failures: dict[str, collections.deque[float]] = {}
         self._locked_until: dict[str, float] = {}
+        self._next_prune = 0.0
+
+    def _prune(self, now: float) -> None:
+        """Forget addresses we have no reason to remember.
+
+        There is one deque per address here, and without this they pile up
+        for every peer that ever connects. Only entries that have aged out
+        of their window go; a live or locked-out address is kept, so this
+        can't be used to wipe a lockout.
+        """
+        self._next_prune = now + PRUNE_INTERVAL
+        for ip in [ip for ip, until in self._locked_until.items() if now >= until]:
+            del self._locked_until[ip]
+        tables = (
+            (self._recent, RATE_WINDOW),
+            (self._failures, self.limits.auth_window),
+        )
+        for table, window in tables:
+            stale = [
+                ip
+                for ip, seen in table.items()
+                if (not seen or now - seen[-1] > window)
+                and ip not in self._live_by_ip
+                and ip not in self._locked_until
+            ]
+            for ip in stale:
+                del table[ip]
 
     def note_rejected_login(self, client_address: tuple[str, int] | str) -> bool:
         """Count one wrong password. True if that address is now shut out."""
@@ -328,6 +357,8 @@ class ThreadingTLSServer(socketserver.ThreadingTCPServer):
         ip = self.peer_ip(client_address)
         now = time.monotonic()
         with self._lock:
+            if now >= self._next_prune:
+                self._prune(now)
             locked_until = self._locked_until.get(ip)
             if locked_until is not None:
                 if now < locked_until:
@@ -357,6 +388,29 @@ class ThreadingTLSServer(socketserver.ThreadingTCPServer):
             self._live_by_ip[ip] += 1
         return True
 
+    def release_request(self, client_address: tuple[str, int] | str) -> None:
+        """Give back the slot taken by verify_request()."""
+        ip = self.peer_ip(client_address)
+        with self._lock:
+            self._live_total -= 1
+            self._live_by_ip[ip] -= 1
+            if self._live_by_ip[ip] <= 0:
+                del self._live_by_ip[ip]
+
+    def process_request(
+        self,
+        request: socket.socket | tuple[bytes, socket.socket],
+        client_address: tuple[str, int] | str,
+    ) -> None:
+        # The slot is normally given back by the connection's own thread. If
+        # that thread can't be started there is no thread to do it, and the
+        # seat would stay taken for the life of the process.
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.release_request(client_address)
+            raise
+
     def process_request_thread(
         self,
         request: socket.socket | tuple[bytes, socket.socket],
@@ -365,12 +419,7 @@ class ThreadingTLSServer(socketserver.ThreadingTCPServer):
         try:
             super().process_request_thread(request, client_address)
         finally:
-            ip = self.peer_ip(client_address)
-            with self._lock:
-                self._live_total -= 1
-                self._live_by_ip[ip] -= 1
-                if self._live_by_ip[ip] <= 0:
-                    del self._live_by_ip[ip]
+            self.release_request(client_address)
 
 
 def require_supported_python() -> None:
