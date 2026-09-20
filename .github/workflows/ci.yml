@@ -117,3 +117,19 @@ jobs:
 
       - name: bats
         run: bats tests/bats/
+
+      # Most people will run this under the python3 that comes with macOS,
+      # not a Homebrew one. That's an older interpreter linked against
+      # LibreSSL rather than OpenSSL, and it has already caught one bug the
+      # 3.13 run missed.
+      - name: pytest on the python macOS ships
+        run: |
+          set -euo pipefail
+          if [ ! -x /usr/bin/python3 ]; then
+            echo "no /usr/bin/python3 on this runner — skipping"
+            exit 0
+          fi
+          /usr/bin/python3 -c 'import sys, ssl; print(sys.version, ssl.OPENSSL_VERSION)'
+          /usr/bin/python3 -m venv "$RUNNER_TEMP/stock"
+          "$RUNNER_TEMP/stock/bin/python" -m pip install --quiet --disable-pip-version-check pytest==8.3.5
+          "$RUNNER_TEMP/stock/bin/python" -m pytest tests/python/ -o addopts= -q
