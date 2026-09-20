@@ -173,6 +173,11 @@ stub_launcher_deps() {
   cat >"$STUB_BIN/opencode" <<'EOF2'
 #!/bin/bash
 printf '%s\n' "$@" >"$HOME/opencode.args"
+exec >/dev/null 2>&1
+exec sleep 60
+EOF2
+  cat >"$STUB_BIN/lsof" <<'EOF2'
+#!/bin/bash
 exit 0
 EOF2
   cat >"$STUB_BIN/caffeinate" <<'EOF2'
@@ -184,7 +189,7 @@ EOF2
 #!/bin/bash
 exit 0
 EOF2
-  chmod +x "$STUB_BIN/opencode" "$STUB_BIN/caffeinate" "$STUB_BIN/python3"
+  chmod +x "$STUB_BIN/opencode" "$STUB_BIN/lsof" "$STUB_BIN/caffeinate" "$STUB_BIN/python3"
 }
 
 @test "launcher binds the backend to loopback only (no LAN-facing plain HTTP)" {
@@ -214,7 +219,8 @@ EOF2
 #!/bin/bash
 printf '%s\n' "$@" >"$HOME/dns-sd.args"
 echo "$$" >"$HOME/dns-sd.pid"
-sleep 60
+exec >/dev/null 2>&1
+exec sleep 60
 EOF2
   chmod +x "$STUB_BIN/route" "$STUB_BIN/ipconfig" "$STUB_BIN/dns-sd"
 }
@@ -254,4 +260,97 @@ EOF2
   [ ! -f "$HOME/dns-sd.args" ]
   assert_contains "$output" "warning"
   assert_contains "$output" ".local"
+}
+
+# --- launcher lifecycle -------------------------------------------------------
+
+assert_dead() {
+  if kill -0 "$1" 2>/dev/null; then
+    echo "process $1 is still alive" >&2
+    return 1
+  fi
+}
+
+@test "launcher records the PIDs of everything it starts" {
+  run run_install "secret-pw" "secret-pw"
+  [ "$status" -eq 0 ]
+  stub_launcher_deps
+  stub_mdns_deps
+  printf '#!/bin/bash\nexec sleep 60\n' >"$STUB_BIN/python3"
+  "$BIN_DIR/opencode-web" >/dev/null 2>&1 &
+  LAUNCHER_PID=$!
+  for _ in $(seq 1 25); do
+    [ -f "$DATA_DIR/run.pid" ] && break
+    sleep 0.2
+  done
+  [ -f "$DATA_DIR/run.pid" ]
+  # launcher itself plus opencode, dns-sd and the relay
+  [ "$(wc -l <"$DATA_DIR/run.pid" | tr -d ' ')" -ge 3 ]
+  kill "$LAUNCHER_PID" 2>/dev/null || true
+  wait "$LAUNCHER_PID" 2>/dev/null || true
+}
+
+@test "kill -TERM on the launcher stops opencode, dns-sd and the relay" {
+  run run_install "secret-pw" "secret-pw"
+  [ "$status" -eq 0 ]
+  stub_launcher_deps
+  stub_mdns_deps
+  printf '#!/bin/bash\nexec sleep 60\n' >"$STUB_BIN/python3"
+  "$BIN_DIR/opencode-web" >/dev/null 2>&1 &
+  LAUNCHER_PID=$!
+  for _ in $(seq 1 25); do
+    [ -f "$DATA_DIR/run.pid" ] && break
+    sleep 0.2
+  done
+  [ -f "$DATA_DIR/run.pid" ]
+  pids="$(cat "$DATA_DIR/run.pid")"
+  kill -TERM "$LAUNCHER_PID"
+  sleep 1
+  for p in $pids; do
+    assert_dead "$p"
+  done
+  assert_dead "$LAUNCHER_PID"
+  [ ! -f "$DATA_DIR/run.pid" ]
+}
+
+@test "launcher fails fast when opencode dies before it is ready" {
+  run run_install "secret-pw" "secret-pw"
+  [ "$status" -eq 0 ]
+  stub_launcher_deps
+  stub_mdns_deps
+  printf '#!/bin/bash\nexit 1\n' >"$STUB_BIN/opencode"
+  printf '#!/bin/bash\nexit 1\n' >"$STUB_BIN/lsof"
+  run "$BIN_DIR/opencode-web"
+  [ "$status" -ne 0 ]
+  assert_contains "$output" "opencode exited"
+}
+
+@test "launcher exits with the relay's status" {
+  run run_install "secret-pw" "secret-pw"
+  [ "$status" -eq 0 ]
+  stub_launcher_deps
+  stub_mdns_deps
+  printf '#!/bin/bash\nexit 7\n' >"$STUB_BIN/python3"
+  run "$BIN_DIR/opencode-web"
+  [ "$status" -eq 7 ]
+}
+
+@test "uninstall stops the processes listed in run.pid" {
+  run run_install "secret-pw" "secret-pw"
+  [ "$status" -eq 0 ]
+  sleep 60 >/dev/null 2>&1 &
+  FAKE_PID=$!
+  echo "$FAKE_PID" >"$DATA_DIR/run.pid"
+  run bash -c "printf 'n\n' | HOME='$TEST_HOME' '$REPO_ROOT/uninstall.sh'"
+  [ "$status" -eq 0 ]
+  assert_dead "$FAKE_PID"
+  [ ! -f "$DATA_DIR/run.pid" ]
+}
+
+@test "uninstall does not kill by process-name pattern" {
+  # pkill -f matches any command line containing the pattern, which can hit
+  # an editor or pager that merely has the file open. The uninstaller must
+  # only ever kill PIDs it recorded itself.
+  run grep -cE '^[[:space:]]*[^#]*\bpkill\b' "$REPO_ROOT/uninstall.sh"
+  [ "$output" = "0" ]
 }

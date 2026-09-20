@@ -10,9 +10,18 @@ echo "opencode-ipad-relay uninstaller"
 echo "==============================="
 echo ""
 
-# Stop anything currently running.
-pkill -f opencode-web-proxy.py 2>/dev/null || true
-pkill -f "opencode web --mdns" 2>/dev/null || true
+# Stop anything currently running. Only PIDs the launcher recorded itself:
+# matching on command lines (pkill -f) also hits editors and pagers that
+# happen to have the file open.
+PID_FILE="$DATA_DIR/run.pid"
+if [ -f "$PID_FILE" ]; then
+  while read -r pid; do
+    [ -n "$pid" ] || continue
+    kill "$pid" 2>/dev/null || true
+  done <"$PID_FILE"
+  rm -f "$PID_FILE"
+  echo "[ok] stopped the running relay and backend"
+fi
 
 rm -f "$BIN_DIR/opencode-web" "$BIN_DIR/opencode-web-proxy.py"
 echo "[ok] removed $BIN_DIR/opencode-web and $BIN_DIR/opencode-web-proxy.py"
