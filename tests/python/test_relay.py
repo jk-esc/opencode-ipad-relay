@@ -260,13 +260,47 @@ def test_concurrent_connections(relay_server: int) -> None:
     )
 
 
-def _obsolete_tls_client() -> ssl.SSLContext:
+def _allow_obsolete_ciphers(ctx: ssl.SSLContext) -> bool:
+    """Let a context offer the old suites, whichever library we are on.
+
+    OpenSSL 3 will not offer TLS 1.1 suites until the security level is
+    dropped; LibreSSL, which is what Apple's python3 links, has no
+    @SECLEVEL token and rejects the whole string if you use it.
+    """
+    for ciphers in ("ALL:@SECLEVEL=0", "ALL"):
+        try:
+            ctx.set_ciphers(ciphers)
+            return True
+        except ssl.SSLError:
+            continue
+    return False
+
+
+def _obsolete_tls_client() -> ssl.SSLContext | None:
+    """A client that speaks only TLS 1.1, or None if this build cannot."""
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
-    ctx.set_ciphers("ALL:@SECLEVEL=0")
-    ctx.minimum_version = ssl.TLSVersion.TLSv1_1
-    ctx.maximum_version = ssl.TLSVersion.TLSv1_1
+    if not _allow_obsolete_ciphers(ctx):
+        return None
+    try:
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_1
+        ctx.maximum_version = ssl.TLSVersion.TLSv1_1
+    except (ValueError, OSError):
+        return None
+    return ctx
+
+
+def _require_obsolete_client() -> ssl.SSLContext:
+    """Skip rather than let the rejection test below pass for free.
+
+    If this build cannot produce a TLS 1.1 client at all, a test that
+    expects the relay to refuse one proves nothing -- that is exactly the
+    bug the old version of it had.
+    """
+    ctx = _obsolete_tls_client()
+    if ctx is None:
+        pytest.skip("this TLS library cannot produce a TLS 1.1 client")
     return ctx
 
 
@@ -282,9 +316,11 @@ def test_the_obsolete_client_can_actually_speak_tls_1_1(
     permits one.
     """
     certfile, keyfile = cert
+    client = _require_obsolete_client()
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_1
-    ctx.set_ciphers("ALL:@SECLEVEL=0")
+    if not _allow_obsolete_ciphers(ctx):
+        pytest.skip("this TLS library cannot serve TLS 1.1 either")
     ctx.load_cert_chain(certfile, keyfile)
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
@@ -302,7 +338,7 @@ def test_the_obsolete_client_can_actually_speak_tls_1_1(
     threading.Thread(target=serve, daemon=True).start()
     raw = socket.create_connection(listener.getsockname(), timeout=10)
     try:
-        with _obsolete_tls_client().wrap_socket(raw, server_hostname="x") as sock:
+        with client.wrap_socket(raw, server_hostname="x") as sock:
             assert sock.version() == "TLSv1.1"
     finally:
         listener.close()
@@ -312,9 +348,10 @@ def test_the_obsolete_client_can_actually_speak_tls_1_1(
 
 def test_tls_1_1_is_rejected(relay_server: int) -> None:
     """A client stuck on TLS 1.1 must not get in."""
+    client = _require_obsolete_client()
     raw = socket.create_connection(("127.0.0.1", relay_server), timeout=10)
     with pytest.raises(ssl.SSLError):
-        _obsolete_tls_client().wrap_socket(raw, server_hostname="opencode.local")
+        client.wrap_socket(raw, server_hostname="opencode.local")
     raw.close()
 
 
