@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import http.server
 import socket
+import socketserver
 import ssl
 import subprocess
 import sys
@@ -837,3 +838,93 @@ def test_a_good_port_in_the_environment_is_used(value: str, expected: int) -> No
 @pytest.mark.parametrize("value", [None, ""])
 def test_an_unset_override_falls_back_to_the_default(value: str | None) -> None:
     assert relay.port_from_env("X", value, 443) == 443
+
+
+# --------------------------------------------------------------------------- #
+# Bookkeeping hygiene
+# --------------------------------------------------------------------------- #
+
+
+def _fresh_server(cert: tuple[str, str], **limits: float) -> relay.ThreadingTLSServer:
+    certfile, keyfile = cert
+    return relay.create_server(
+        certfile, keyfile, "127.0.0.1", 0, limits=relay.Limits(**limits)
+    )
+
+
+def test_a_slot_is_released_if_the_connection_thread_cannot_start(
+    cert: tuple[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A slot taken at accept must come back even when the handler never runs.
+
+    The count is decremented by the connection's own thread. If that thread
+    can't be started the seat stays taken for good, and enough of those and
+    the relay turns everyone away.
+    """
+    server = _fresh_server(cert, max_connections=1, max_per_ip=1, new_per_minute=99)
+    try:
+
+        def boom(self, request, client_address):  # noqa: ANN001, ANN202
+            raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(socketserver.ThreadingMixIn, "process_request", boom)
+        addr = ("10.1.1.1", 5000)
+        assert server.verify_request(None, addr) is True
+        with pytest.raises(RuntimeError):
+            server.process_request(None, addr)
+        assert server.verify_request(None, addr) is True, "the slot leaked"
+    finally:
+        server.server_close()
+
+
+def test_addresses_are_forgotten_once_they_go_quiet(
+    cert: tuple[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Per-address history must not accumulate for every peer ever seen.
+
+    One deque per address with nothing ever removing it is a slow leak fed
+    by whoever is on the network.
+    """
+    monkeypatch.setattr(relay, "RATE_WINDOW", 0.4)
+    monkeypatch.setattr(relay, "PRUNE_INTERVAL", 0.0)
+    server = _fresh_server(
+        cert, max_connections=999, max_per_ip=999, new_per_minute=99, auth_window=0.4
+    )
+    try:
+        for i in range(200):
+            addr = (f"10.9.{i // 256}.{i % 256}", 5000)
+            assert server.verify_request(None, addr) is True
+            server.release_request(addr)
+        assert len(server._recent) == 200, "expected one entry per address so far"
+
+        time.sleep(0.6)  # everything above is now outside the window
+        server.verify_request(None, ("10.9.255.254", 5000))
+        assert len(server._recent) <= 2, f"stale entries kept: {len(server._recent)}"
+    finally:
+        server.server_close()
+
+
+def test_a_locked_out_address_is_never_forgotten_early(
+    cert: tuple[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tidying up must not hand an attacker a clean slate."""
+    monkeypatch.setattr(relay, "RATE_WINDOW", 0.4)
+    monkeypatch.setattr(relay, "PRUNE_INTERVAL", 0.0)
+    server = _fresh_server(
+        cert,
+        max_connections=999,
+        max_per_ip=999,
+        new_per_minute=99,
+        auth_failures=1,
+        auth_window=0.4,
+        lockout_seconds=30,
+    )
+    try:
+        bad = ("10.9.0.1", 5000)
+        assert server.note_rejected_login(bad) is True
+        time.sleep(0.6)
+        for i in range(50):
+            server.verify_request(None, (f"10.8.{i // 256}.{i % 256}", 5000))
+        assert server.verify_request(None, bad) is False, "lockout was pruned away"
+    finally:
+        server.server_close()
