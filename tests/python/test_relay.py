@@ -148,6 +148,8 @@ def _tls_connect(
     port: int, server_hostname: str = "opencode.local", timeout: float = 10
 ) -> ssl.SSLSocket:
     ctx = ssl.create_default_context()
+    # Not the default everywhere: on Apple's python3 this starts at TLSv1.
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
     raw = socket.create_connection(("127.0.0.1", port), timeout=timeout)
@@ -186,10 +188,12 @@ def test_tls_serves_the_opencode_local_certificate(
     """
     certfile, _ = cert
     ctx = ssl.create_default_context(cafile=certfile)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.check_hostname = True
     ctx.verify_mode = ssl.CERT_REQUIRED
     raw = socket.create_connection(("127.0.0.1", relay_server), timeout=10)
     with ctx.wrap_socket(raw, server_hostname="opencode.local") as sock:
+        assert sock.version() in ("TLSv1.2", "TLSv1.3"), sock.version()
         peer = sock.getpeercert()
         assert peer, "verified connection should expose the certificate"
         names = {
@@ -204,6 +208,7 @@ def test_a_certificate_for_another_name_is_rejected(
     """Proves the check above is doing something."""
     certfile, _ = cert
     ctx = ssl.create_default_context(cafile=certfile)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     raw = socket.create_connection(("127.0.0.1", relay_server), timeout=10)
     with pytest.raises(ssl.CertificateError):
         ctx.wrap_socket(raw, server_hostname="not-opencode.local")
@@ -965,3 +970,18 @@ def test_a_locked_out_address_is_never_forgotten_early(
         assert server.verify_request(None, bad) is False, "lockout was pruned away"
     finally:
         server.server_close()
+
+
+def test_our_test_clients_refuse_obsolete_tls(relay_server: int) -> None:
+    """The clients this suite connects with must not accept TLS 1.0 or 1.1.
+
+    ssl.create_default_context() does not pin a floor on every build: on
+    the python that ships with macOS its minimum is TLSv1. A client like
+    that would happily negotiate TLS 1.0, so every assertion in this file
+    would still pass if the relay's floor regressed -- blind to the exact
+    thing several of these tests exist to check.
+
+    _obsolete_tls_client() is deliberately exempt; being obsolete is its job.
+    """
+    with _tls_connect(relay_server) as sock:
+        assert sock.context.minimum_version >= ssl.TLSVersion.TLSv1_2
