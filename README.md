@@ -245,6 +245,13 @@ This runs shellcheck, shfmt, ruff, mypy, bandit, the pytest suite (relay),
 the bats suite (installer), and gitleaks. CI additionally runs the tests on
 both Intel and Apple Silicon macOS runners and CodeQL on Python.
 
+Those suites stub `opencode` out so they can run anywhere, which means they
+never check that the relay and the real thing work together. That's what
+`./scripts/e2e.sh` is for: it starts a real backend on loopback, puts the
+relay in front of it, and checks the login, the TLS version, the event
+stream, and that a wrong password gets you disconnected. It needs `opencode`
+installed, so CI doesn't run it.
+
 Please keep these invariants:
 
 - **No secrets in the repo** — passwords/certs/keys are generated locally.
