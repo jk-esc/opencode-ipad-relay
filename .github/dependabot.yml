@@ -5,11 +5,3 @@ updates:
     schedule:
       interval: "monthly"
     open-pull-requests-limit: 5
-
-  # requirements-dev.txt was not being watched, so the linters and the test
-  # runner could sit on old versions indefinitely.
-  - package-ecosystem: "pip"
-    directory: "/"
-    schedule:
-      interval: "monthly"
-    open-pull-requests-limit: 5
